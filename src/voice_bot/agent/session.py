@@ -24,19 +24,31 @@ from voice_bot.config import Settings
 def build_session(settings: Settings) -> AgentSession:
     """Создать :class:`AgentSession` с провайдерами из настроек.
 
+    Ключи API передаются в плагины явно из ``settings``, чтобы не зависеть
+    от внутренних имён переменных окружения провайдеров (например,
+    ``ELEVEN_API_KEY`` у ElevenLabs vs ``ELEVENLABS_API_KEY`` в проекте).
+
     Args:
-        settings: настройки приложения (модели, язык, идентификатор голоса).
+        settings: настройки приложения (модели, язык, идентификатор голоса, ключи).
 
     Returns:
         Готовая к запуску голосовая сессия.
     """
     return AgentSession(
         # Речь → текст. Язык фиксируем, чтобы модель его не угадывала.
-        stt=openai.STT(model=settings.stt_model, language=settings.language),
+        stt=openai.STT(
+            model=settings.stt_model,
+            language=settings.language,
+            api_key=settings.openai_api_key,
+        ),
         # «Мозг»: формулирует короткие реплики по системному промпту.
-        llm=openai.LLM(model=settings.llm_model),
+        llm=openai.LLM(model=settings.llm_model, api_key=settings.openai_api_key),
         # Текст → голос. voice_id — тот самый записанный голос компании.
-        tts=elevenlabs.TTS(voice_id=settings.elevenlabs_voice_id, model=settings.tts_model),
+        tts=elevenlabs.TTS(
+            voice_id=settings.elevenlabs_voice_id,
+            model=settings.tts_model,
+            api_key=settings.elevenlabs_api_key,
+        ),
         # Слышит границы речи (начал/закончил говорить).
         vad=silero.VAD.load(),
         # Определяет, что реплика клиента завершена (мультиязычная модель).

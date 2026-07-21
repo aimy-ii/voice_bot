@@ -63,6 +63,7 @@ LiveKit локально бесплатный — ключи для него у�
 ```bash
 cp .env.example .env        # вписать OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
 make install                # поставить зависимости
+make download-files         # разово скачать веса моделей (иначе console/dev падают на turn-detector)
 make console                # поговорить с ботом прямо в терминале
 ```
 

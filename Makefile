@@ -7,6 +7,9 @@ help:  ## Показать список команд
 install:  ## Установить зависимости (dev)
 	$(PY) -m pip install -e ".[dev]"
 
+download-files:  ## Скачать веса моделей (turn-detector и т.п.), разово
+	uv run python -m voice_bot.agent.main download-files
+
 console:  ## Локальный тест агента в терминале (микрофон)
 	$(PY) -m voice_bot.agent.main console
 
@@ -29,4 +32,4 @@ up:  ## Поднять LiveKit-сервер + бота в docker
 down:  ## Остановить контейнеры
 	docker compose down
 
-.PHONY: help install console dev lint format test up down
+.PHONY: help install download-files console dev lint format test up down
