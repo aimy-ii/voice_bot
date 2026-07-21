@@ -16,6 +16,8 @@ def test_build_session_passes_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "el-test-key")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "voice-123")
+    # Перекрыть локальный .env: без прокси клиенты не создаются.
+    monkeypatch.setenv("PROXY_HOST", "")
 
     stt_mock = MagicMock(name="STT")
     llm_mock = MagicMock(name="LLM")

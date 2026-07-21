@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = Field(alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str = Field(alias="ELEVENLABS_VOICE_ID")
 
+    # --- SOCKS5-прокси (опционально; обход региональных блокировок) ---
+    proxy_host: str | None = Field(default=None, alias="PROXY_HOST")
+    proxy_port: int | None = Field(default=None, alias="PROXY_PORT")
+    proxy_user: str | None = Field(default=None, alias="PROXY_USER")
+    proxy_pass: str | None = Field(default=None, alias="PROXY_PASS")
+
     # --- Необязательные настройки (со значениями по умолчанию) ---
     language: str = Field(default="ru", alias="VOICE_BOT_LANGUAGE")
     stt_model: str = Field(default="gpt-4o-mini-transcribe", alias="VOICE_BOT_STT_MODEL")
@@ -47,6 +53,41 @@ class Settings(BaseSettings):
     agent_name: str = Field(default="voice-bot", alias="VOICE_BOT_AGENT_NAME")
     scenario: str = Field(default="vector_ru", alias="VOICE_BOT_SCENARIO")
     log_level: str = Field(default="INFO", alias="VOICE_BOT_LOG_LEVEL")
+
+    @property
+    def proxy_url(self) -> str | None:
+        """Собрать SOCKS5-URL прокси или None, если прокси не сконфигурирован.
+
+        Формат socks5h:// — DNS резолвится на стороне прокси (нужно для обхода
+        региональных блокировок).
+        """
+        if not (self.proxy_host and self.proxy_port):
+            return None
+        if self.proxy_user and self.proxy_pass:
+            return (
+                f"socks5h://{self.proxy_user}:{self.proxy_pass}@{self.proxy_host}:{self.proxy_port}"
+            )
+        return f"socks5h://{self.proxy_host}:{self.proxy_port}"
+
+    @property
+    def proxy_fields(self) -> dict[str, object] | None:
+        """Поля SOCKS5-прокси для aiohttp_socks (host/port/логин/пароль).
+
+        Возвращается отдельно от proxy_url, потому что python_socks не понимает
+        схему socks5h. DNS-резолв на стороне прокси включается флагом rdns=True
+        при создании коннектора, а не суффиксом h в схеме.
+        """
+        if not (self.proxy_host and self.proxy_port):
+            return None
+        fields: dict[str, object] = {
+            "host": self.proxy_host,
+            "port": self.proxy_port,
+            "rdns": True,
+        }
+        if self.proxy_user and self.proxy_pass:
+            fields["username"] = self.proxy_user
+            fields["password"] = self.proxy_pass
+        return fields
 
 
 @lru_cache

@@ -5,8 +5,8 @@ import pytest
 from voice_bot.config import Settings
 
 
-def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Настройки читают ключи из окружения по ожидаемым именам."""
+def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Задать обязательные переменные окружения для Settings."""
     monkeypatch.setenv("LIVEKIT_URL", "ws://localhost:7880")
     monkeypatch.setenv("LIVEKIT_API_KEY", "devkey")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "secret")
@@ -14,8 +14,98 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELEVENLABS_API_KEY", "el-test")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "voice-123")
 
+
+def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Настройки читают ключи из окружения по ожидаемым именам."""
+    _set_required_env(monkeypatch)
+
     settings = Settings()  # type: ignore[call-arg]
 
     assert settings.livekit_url == "ws://localhost:7880"
     assert settings.elevenlabs_voice_id == "voice-123"
     assert settings.language == "ru"
+
+
+def test_proxy_url_none_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без PROXY_HOST свойство proxy_url возвращает None.
+
+    Пустая строка перекрывает значение из ``.env`` (если файл есть локально).
+    """
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PROXY_HOST", "")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.proxy_url is None
+
+
+def test_proxy_url_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """При всех PROXY_* собирается socks5h://user:pass@host:port."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.proxy_url == "socks5h://user:pass@proxy.example:1080"
+
+
+def test_proxy_url_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без user/pass собирается socks5h://host:port."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "")
+    monkeypatch.setenv("PROXY_PASS", "")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.proxy_url == "socks5h://proxy.example:1080"
+
+
+def test_proxy_fields_none_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без PROXY_HOST свойство proxy_fields возвращает None."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PROXY_HOST", "")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.proxy_fields is None
+
+
+def test_proxy_fields_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """При всех PROXY_* — host/port/rdns и username/password."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.proxy_fields == {
+        "host": "proxy.example",
+        "port": 1080,
+        "rdns": True,
+        "username": "user",
+        "password": "pass",
+    }
+
+
+def test_proxy_fields_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без user/pass — только host/port/rdns."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "")
+    monkeypatch.setenv("PROXY_PASS", "")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.proxy_fields == {
+        "host": "proxy.example",
+        "port": 1080,
+        "rdns": True,
+    }
