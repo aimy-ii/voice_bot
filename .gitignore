@@ -1,14 +1,45 @@
-__pycache__/
-*.pyc
+# ─── Секреты и локальные env ────────────────────────────────
 .env
+.env.*
+!.env.example
+
+# ─── Python / виртуальные окружения / артефакты сборки ──────
+__pycache__/
+*.py[cod]
+*$py.class
 .venv/
 venv/
 dist/
 build/
 *.egg-info/
+.eggs/
+*.egg
+
+# ─── Тесты, линтеры, покрытие ───────────────────────────────
 .pytest_cache/
+pytest-cache-files-*/
 .ruff_cache/
-# ─── IDE / редакторы / AI-инструменты ───────────────────────────────
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# ─── Логи и временные файлы ─────────────────────────────────
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
+
+# ─── OS ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── IDE / редакторы / AI-инструменты ───────────────────────
 .idea/
 .vscode/
 .cursor/
