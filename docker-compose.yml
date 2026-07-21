@@ -24,6 +24,33 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
       ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY}"
       ELEVENLABS_VOICE_ID: "${ELEVENLABS_VOICE_ID}"
+      # SOCKS5-прокси из .env (нужен, если ElevenLabs/OpenAI режут по региону).
+      PROXY_HOST: "${PROXY_HOST}"
+      PROXY_PORT: "${PROXY_PORT}"
+      PROXY_USER: "${PROXY_USER}"
+      PROXY_PASS: "${PROXY_PASS}"
+      # Громкость фона (можно крутить в .env без правки кода).
+      BG_ENABLED: "${BG_ENABLED:-true}"
+      BG_AMBIENT_VOLUME: "${BG_AMBIENT_VOLUME:-0.4}"
+      BG_THINKING_VOLUME: "${BG_THINKING_VOLUME:-0.6}"
       VOICE_BOT_LOG_LEVEL: "INFO"
     # dev-режим: воркер регистрируется на сервере и ждёт звонков.
     command: ["python", "-m", "voice_bot.agent.main", "dev"]
+
+  # Локальный веб-клиент: официальный agent-starter-react (сборка из git).
+  # Сам выдаёт JWT через /api/token — ручной make token не нужен.
+  playground:
+    build:
+      context: ./playground
+    depends_on:
+      - livekit
+    ports:
+      - "3000:3000"
+    environment:
+      # serverUrl уходит в браузер → localhost (не имя сервиса docker).
+      LIVEKIT_URL: "ws://localhost:7880"
+      LIVEKIT_API_KEY: "devkey"
+      LIVEKIT_API_SECRET: "secret"
+      # Пусто = автоподхват агента (как AGENT_AUTO_ACCEPT у воркера).
+      AGENT_NAME: ""
+      NODE_ENV: development

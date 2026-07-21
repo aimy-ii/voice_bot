@@ -15,6 +15,9 @@ console:  ## Локальный тест агента в терминале (м�
 dev:  ## Запустить воркер против LiveKit-сервера
 	uv run python -m voice_bot.agent.main dev
 
+token:  ## JWT-токен для LiveKit Playground (stdout)
+	uv run python -m voice_bot.agent.token
+
 lint:  ## Проверить код линтером ruff
 	uv run ruff check src tests
 
@@ -33,10 +36,13 @@ check:  ## Всё сразу: формат + линт + тесты
 up:  ## Поднять LiveKit-сервер + бота в docker
 	docker compose up --build
 
+play:  ## Подсказка: URL локального веб-клиента агента
+	@echo "Playground: http://localhost:3000"
+
 down:  ## Остановить контейнеры
 	docker compose down
 
 logs:  ## Логи docker-стека (follow)
 	docker compose logs -f
 
-.PHONY: help install download-files console dev lint format test check up down logs
+.PHONY: help install download-files console dev token lint format test check up play down logs

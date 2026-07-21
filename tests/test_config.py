@@ -169,7 +169,7 @@ def test_background_audio_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.bg_enabled is True
-    assert settings.bg_ambient_volume == 0.15
+    assert settings.bg_ambient_volume == 0.4
     assert settings.bg_thinking_volume == 0.6
 
 
@@ -185,3 +185,23 @@ def test_background_audio_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.bg_enabled is False
     assert settings.bg_ambient_volume == 0.12
     assert settings.bg_thinking_volume == 0.45
+
+
+def test_agent_auto_accept_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без AGENT_AUTO_ACCEPT — автоподхват комнат включён."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("AGENT_AUTO_ACCEPT", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.agent_auto_accept is True
+
+
+def test_agent_auto_accept_false_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AGENT_AUTO_ACCEPT=false парсится в bool False."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("AGENT_AUTO_ACCEPT", "false")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.agent_auto_accept is False

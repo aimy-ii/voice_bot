@@ -56,13 +56,15 @@ class Settings(BaseSettings):
     stt_model: str = Field(default="gpt-4o-mini-transcribe", alias="VOICE_BOT_STT_MODEL")
     llm_model: str = Field(default="gpt-4.1-mini", alias="VOICE_BOT_LLM_MODEL")
     agent_name: str = Field(default="voice-bot", alias="VOICE_BOT_AGENT_NAME")
+    # true — автоподхват комнат (локальные тесты); false — только явный dispatch по имени.
+    agent_auto_accept: bool = Field(default=True, alias="AGENT_AUTO_ACCEPT")
     scenario: str = Field(default="vector_ru", alias="VOICE_BOT_SCENARIO")
     log_level: str = Field(default="INFO", alias="VOICE_BOT_LOG_LEVEL")
 
     # --- Фоновый звук (офисный эмбиент + клавиатура в паузах thinking) ---
     bg_enabled: bool = Field(default=True, alias="BG_ENABLED")
-    # Эмбиент держим тихим: 0.1–0.2, иначе перекрывает голос.
-    bg_ambient_volume: float = Field(default=0.15, alias="BG_AMBIENT_VOLUME")
+    # Эмбиент слышен, но не перекрывает голос (при 0.15 почти не слышно).
+    bg_ambient_volume: float = Field(default=0.4, alias="BG_AMBIENT_VOLUME")
     bg_thinking_volume: float = Field(default=0.6, alias="BG_THINKING_VOLUME")
 
     @property

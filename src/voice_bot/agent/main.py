@@ -37,14 +37,31 @@ load_dotenv()
 setup_logging(os.getenv("VOICE_BOT_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("voice_bot")
 
-# Имя агента читаем без полной валидации настроек, чтобы служебные команды CLI
-# (download-files, --help) работали и без секретов в окружении.
+# Имя и режим подхвата читаем без полной валидации настроек, чтобы служебные
+# команды CLI (download-files, --help) работали и без секретов в окружении.
 _AGENT_NAME = os.getenv("VOICE_BOT_AGENT_NAME", "voice-bot")
+_AGENT_AUTO_ACCEPT = os.getenv("AGENT_AUTO_ACCEPT", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 server = AgentServer()
 
 
-@server.rtc_session(agent_name=_AGENT_NAME)
+def _rtc_session_agent_name(*, auto_accept: bool, agent_name: str) -> str:
+    """Имя для ``rtc_session``: пустая строка = автоподхват комнат (API 1.6.6).
+
+    При непустом ``agent_name`` воркер ждёт явный dispatch; при ``""`` —
+    принимает комнаты автоматически (удобно для локальных тестов).
+    """
+    return "" if auto_accept else agent_name
+
+
+@server.rtc_session(
+    agent_name=_rtc_session_agent_name(auto_accept=_AGENT_AUTO_ACCEPT, agent_name=_AGENT_NAME)
+)
 async def entrypoint(ctx: agents.JobContext) -> None:
     """Обработать один звонок: собрать сессию и начать разговор по сценарию."""
     settings = get_settings()  # здесь уже нужны все ключи — но и звонок реальный
