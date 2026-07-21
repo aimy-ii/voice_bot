@@ -157,3 +157,31 @@ def test_proxy_fields_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
         "port": 1080,
         "rdns": True,
     }
+
+
+def test_background_audio_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без BG_* — фон включён, тихий эмбиент и средняя громкость thinking."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("BG_ENABLED", raising=False)
+    monkeypatch.delenv("BG_AMBIENT_VOLUME", raising=False)
+    monkeypatch.delenv("BG_THINKING_VOLUME", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.bg_enabled is True
+    assert settings.bg_ambient_volume == 0.15
+    assert settings.bg_thinking_volume == 0.6
+
+
+def test_background_audio_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BG_ENABLED / громкости читаются из окружения; false парсится в bool."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("BG_ENABLED", "false")
+    monkeypatch.setenv("BG_AMBIENT_VOLUME", "0.12")
+    monkeypatch.setenv("BG_THINKING_VOLUME", "0.45")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.bg_enabled is False
+    assert settings.bg_ambient_volume == 0.12
+    assert settings.bg_thinking_volume == 0.45

@@ -14,12 +14,19 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from livekit import agents
-from livekit.agents import AgentServer, AgentSession, ConversationItemAddedEvent
+from livekit import agents, rtc
+from livekit.agents import (
+    AgentServer,
+    AgentSession,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    BuiltinAudioClip,
+    ConversationItemAddedEvent,
+)
 
 from voice_bot.agent.script_agent import ScriptAgent
 from voice_bot.agent.session import build_session
-from voice_bot.config import get_settings
+from voice_bot.config import Settings, get_settings
 from voice_bot.logging_setup import setup_logging
 from voice_bot.scenario.loader import load_scenario
 from voice_bot.scenario.prompt import build_system_prompt
@@ -48,6 +55,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     _attach_latency_logging(session)
 
     await session.start(room=ctx.room, agent=ScriptAgent(build_system_prompt(scenario)))
+    await _start_background_audio(room=ctx.room, session=session, settings=settings)
 
     # Приветствие произносим дословно из сценария: первая фраза всегда
     # одинаковая и предсказуемая, её не отдаём на волю модели.
@@ -73,6 +81,40 @@ def _attach_latency_logging(session: AgentSession) -> None:
     @session.on("conversation_item_added")
     def _on_item(ev: ConversationItemAddedEvent) -> None:
         _log_assistant_latency(ev.item)
+
+
+async def _start_background_audio(
+    *,
+    room: rtc.Room,
+    session: AgentSession,
+    settings: Settings,
+) -> BackgroundAudioPlayer | None:
+    """Подключить тихий офисный эмбиент и звук клавиатуры в паузах thinking.
+
+    Использует встроенные клипы LiveKit Agents (``BuiltinAudioClip``).
+    При ``BG_ENABLED=false`` плеер не создаётся — звонок идёт без фона.
+    """
+    if not settings.bg_enabled:
+        logger.info("Фоновый звук отключён (BG_ENABLED=false)")
+        return None
+
+    player = BackgroundAudioPlayer(
+        ambient_sound=AudioConfig(
+            BuiltinAudioClip.OFFICE_AMBIENCE,
+            volume=settings.bg_ambient_volume,
+        ),
+        thinking_sound=AudioConfig(
+            BuiltinAudioClip.KEYBOARD_TYPING,
+            volume=settings.bg_thinking_volume,
+        ),
+    )
+    await player.start(room=room, agent_session=session)
+    logger.info(
+        "Фоновый звук подключён: ambient=%.2f thinking=%.2f",
+        settings.bg_ambient_volume,
+        settings.bg_thinking_volume,
+    )
+    return player
 
 
 if __name__ == "__main__":
