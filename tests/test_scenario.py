@@ -18,3 +18,21 @@ def test_prompt_mentions_persona() -> None:
     prompt = build_system_prompt(scenario)
     assert scenario.persona.agent_name in prompt
     assert "русск" in prompt.lower()
+
+
+def test_base_rules_add_liveliness_fillers() -> None:
+    """В системный промпт попадают разговорные слова-связки для живости речи."""
+    scenario = load_scenario("vector_ru")
+    prompt = build_system_prompt(scenario)
+    assert "связк" in prompt.lower()
+    for filler in ("«ну»", "«смотрите»", "«так»", "«давайте»"):
+        assert filler in prompt
+
+
+def test_name_rule_asks_for_restraint() -> None:
+    """Правило сценария просит обращаться по имени редко, а не в каждой фразе."""
+    scenario = load_scenario("vector_ru")
+    rules_text = " ".join(scenario.rules).lower()
+    assert "имя" in rules_text
+    assert "редко" in rules_text
+    assert "как только он представится" not in rules_text
