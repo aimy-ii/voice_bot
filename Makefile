@@ -1,30 +1,34 @@
 .DEFAULT_GOAL := help
-PY := python
 
 help:  ## Показать список команд
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}'
 
-install:  ## Установить зависимости (dev)
-	$(PY) -m pip install -e ".[dev]"
+install:  ## Установить зависимости (uv sync)
+	uv sync
 
 download-files:  ## Скачать веса моделей (turn-detector и т.п.), разово
 	uv run python -m voice_bot.agent.main download-files
 
 console:  ## Локальный тест агента в терминале (микрофон)
-	$(PY) -m voice_bot.agent.main console
+	uv run python -m voice_bot.agent.main console
 
 dev:  ## Запустить воркер против LiveKit-сервера
-	$(PY) -m voice_bot.agent.main dev
+	uv run python -m voice_bot.agent.main dev
 
 lint:  ## Проверить код линтером ruff
-	ruff check src tests
+	uv run ruff check src tests
 
 format:  ## Отформатировать код и починить импорты
-	ruff format src tests
-	ruff check --fix src tests
+	uv run ruff format src tests
+	uv run ruff check --fix src tests
 
 test:  ## Прогнать тесты
-	pytest
+	uv run pytest
+
+check:  ## Всё сразу: формат + линт + тесты
+	uv run ruff format src tests
+	uv run ruff check src tests
+	uv run pytest
 
 up:  ## Поднять LiveKit-сервер + бота в docker
 	docker compose up --build
@@ -32,4 +36,7 @@ up:  ## Поднять LiveKit-сервер + бота в docker
 down:  ## Остановить контейнеры
 	docker compose down
 
-.PHONY: help install download-files console dev lint format test up down
+logs:  ## Логи docker-стека (follow)
+	docker compose logs -f
+
+.PHONY: help install download-files console dev lint format test check up down logs

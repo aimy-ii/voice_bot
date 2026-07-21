@@ -45,4 +45,6 @@ def test_build_session_passes_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     vad_load_mock.assert_called_once_with()
     turn_model_mock.assert_called_once_with()
     session_ctor.assert_called_once()
+    turn_handling = session_ctor.call_args.kwargs["turn_handling"]
+    assert turn_handling["turn_detection"] is turn_model_mock.return_value
     assert result is session_ctor.return_value

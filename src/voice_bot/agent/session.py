@@ -20,7 +20,7 @@ import aiohttp
 import httpx
 import openai as openai_sdk
 from aiohttp_socks import ProxyConnector, ProxyType
-from livekit.agents import AgentSession
+from livekit.agents import AgentSession, TurnHandlingOptions
 from livekit.plugins import elevenlabs, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -112,5 +112,5 @@ def build_session(settings: Settings) -> AgentSession:
         # Слышит границы речи (начал/закончил говорить).
         vad=silero.VAD.load(),
         # Определяет, что реплика клиента завершена (мультиязычная модель).
-        turn_detection=MultilingualModel(),
+        turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
     )

@@ -54,15 +54,25 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     await session.say(scenario.opening_line, allow_interruptions=False)
 
 
+def _log_assistant_latency(item: object) -> None:
+    """Залогировать e2e-задержку ответа ассистента, если метрика есть.
+
+    Через ``conversation_item_added`` приходят и служебные объекты без ``role``
+    (например, ``AgentHandoff``) — их безопасно игнорируем.
+    """
+    role = getattr(item, "role", None)
+    metrics = getattr(item, "metrics", None) or {}
+    latency = metrics.get("e2e_latency") if isinstance(metrics, dict) else None
+    if role == "assistant" and latency is not None:
+        logger.info("Задержка ответа: e2e=%.2fс", latency)
+
+
 def _attach_latency_logging(session: AgentSession) -> None:
     """Логировать задержку каждого ответа бота — для контроля скорости."""
 
     @session.on("conversation_item_added")
     def _on_item(ev: ConversationItemAddedEvent) -> None:
-        metrics = getattr(ev.item, "metrics", None) or {}
-        latency = metrics.get("e2e_latency")
-        if ev.item.role == "assistant" and latency is not None:
-            logger.info("Задержка ответа: e2e=%.2fс", latency)
+        _log_assistant_latency(ev.item)
 
 
 if __name__ == "__main__":
