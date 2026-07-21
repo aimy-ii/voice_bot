@@ -89,6 +89,13 @@ def build_session(settings: Settings) -> AgentSession:
         "voice_id": settings.elevenlabs_voice_id,
         "model": settings.tts_model,
         "api_key": settings.elevenlabs_api_key,
+        # Ровный тон между фразами: стабильность/похожесть из настроек, без style.
+        "voice_settings": elevenlabs.VoiceSettings(
+            stability=settings.elevenlabs_stability,
+            similarity_boost=settings.elevenlabs_similarity,
+            style=settings.elevenlabs_style,
+            speed=1.0,
+        ),
     }
 
     proxy_url = settings.proxy_url

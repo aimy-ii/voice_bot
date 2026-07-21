@@ -16,8 +16,12 @@ def test_build_session_passes_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai")
     monkeypatch.setenv("ELEVENLABS_API_KEY", "el-test-key")
     monkeypatch.setenv("ELEVENLABS_VOICE_ID", "voice-123")
-    # Перекрыть локальный .env: без прокси клиенты не создаются.
+    # Перекрыть локальный .env: без прокси клиенты не создаются; дефолты тона.
     monkeypatch.setenv("PROXY_HOST", "")
+    monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_SIMILARITY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_STYLE", raising=False)
+    monkeypatch.delenv("ELEVENLABS_MODEL", raising=False)
 
     stt_mock = MagicMock(name="STT")
     llm_mock = MagicMock(name="LLM")
@@ -33,7 +37,7 @@ def test_build_session_passes_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(session_module, "MultilingualModel", turn_model_mock)
     monkeypatch.setattr(session_module, "AgentSession", session_ctor)
 
-    settings = Settings()  # type: ignore[call-arg]
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
     result = session_module.build_session(settings)
 
     stt_mock.assert_called_once()
@@ -42,6 +46,12 @@ def test_build_session_passes_api_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     assert llm_mock.call_args.kwargs["api_key"] == "sk-test-openai"
     tts_mock.assert_called_once()
     assert tts_mock.call_args.kwargs["api_key"] == "el-test-key"
+    assert tts_mock.call_args.kwargs["model"] == "eleven_multilingual_v2"
+    voice_settings = tts_mock.call_args.kwargs["voice_settings"]
+    assert voice_settings.stability == 0.7
+    assert voice_settings.similarity_boost == 0.8
+    assert voice_settings.style == 0.0
+    assert voice_settings.speed == 1.0
     vad_load_mock.assert_called_once_with()
     turn_model_mock.assert_called_once_with()
     session_ctor.assert_called_once()

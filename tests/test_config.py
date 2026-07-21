@@ -26,6 +26,54 @@ def test_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.language == "ru"
 
 
+def test_elevenlabs_voice_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без ELEVENLABS_STABILITY/SIMILARITY/STYLE — дефолты для ровного тона."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("ELEVENLABS_STABILITY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_SIMILARITY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_STYLE", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.elevenlabs_stability == 0.7
+    assert settings.elevenlabs_similarity == 0.8
+    assert settings.elevenlabs_style == 0.0
+
+
+def test_elevenlabs_voice_settings_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ELEVENLABS_STABILITY/SIMILARITY/STYLE читаются из окружения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("ELEVENLABS_STABILITY", "0.55")
+    monkeypatch.setenv("ELEVENLABS_SIMILARITY", "0.9")
+    monkeypatch.setenv("ELEVENLABS_STYLE", "0.1")
+
+    settings = Settings()  # type: ignore[call-arg]
+
+    assert settings.elevenlabs_stability == 0.55
+    assert settings.elevenlabs_similarity == 0.9
+    assert settings.elevenlabs_style == 0.1
+
+
+def test_elevenlabs_model_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без ELEVENLABS_MODEL — стабильная multilingual_v2."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("ELEVENLABS_MODEL", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.tts_model == "eleven_multilingual_v2"
+
+
+def test_elevenlabs_model_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ELEVENLABS_MODEL читается из окружения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("ELEVENLABS_MODEL", "eleven_turbo_v2_5")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.tts_model == "eleven_turbo_v2_5"
+
+
 def test_proxy_url_none_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без PROXY_HOST свойство proxy_url возвращает None.
 

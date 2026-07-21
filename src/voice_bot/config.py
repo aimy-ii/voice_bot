@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # --- ElevenLabs: синтез голоса (TTS) ---
     elevenlabs_api_key: str = Field(alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str = Field(alias="ELEVENLABS_VOICE_ID")
+    # multilingual_v2 — стабильнее по тону на клонированном голосе, чем flash.
+    tts_model: str = Field(default="eleven_multilingual_v2", alias="ELEVENLABS_MODEL")
+    # Ровный деловой тон: высокая стабильность, без лишней экспрессии.
+    elevenlabs_stability: float = Field(default=0.7, alias="ELEVENLABS_STABILITY")
+    elevenlabs_similarity: float = Field(default=0.8, alias="ELEVENLABS_SIMILARITY")
+    elevenlabs_style: float = Field(default=0.0, alias="ELEVENLABS_STYLE")
 
     # --- SOCKS5-прокси (опционально; обход региональных блокировок) ---
     proxy_host: str | None = Field(default=None, alias="PROXY_HOST")
@@ -49,7 +55,6 @@ class Settings(BaseSettings):
     language: str = Field(default="ru", alias="VOICE_BOT_LANGUAGE")
     stt_model: str = Field(default="gpt-4o-mini-transcribe", alias="VOICE_BOT_STT_MODEL")
     llm_model: str = Field(default="gpt-4.1-mini", alias="VOICE_BOT_LLM_MODEL")
-    tts_model: str = Field(default="eleven_flash_v2_5", alias="VOICE_BOT_TTS_MODEL")
     agent_name: str = Field(default="voice-bot", alias="VOICE_BOT_AGENT_NAME")
     scenario: str = Field(default="vector_ru", alias="VOICE_BOT_SCENARIO")
     log_level: str = Field(default="INFO", alias="VOICE_BOT_LOG_LEVEL")
