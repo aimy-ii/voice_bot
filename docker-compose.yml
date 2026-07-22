@@ -2,13 +2,15 @@ services:
   # Труба для звука: self-hosted LiveKit-сервер в dev-режиме.
   livekit:
     image: livekit/livekit-server:latest
-    command: --dev --bind 0.0.0.0
+    command: --bind 0.0.0.0
     ports:
       - "7880:7880"       # WebSocket / API
       - "7881:7881"       # WebRTC (TCP)
       - "7882:7882/udp"   # WebRTC (UDP)
     environment:
       LIVEKIT_KEYS: "devkey: secret"
+    logging:
+      driver: none
 
   # Голосовой бот (воркер). Подключается к сервису livekit по docker-сети.
   agent:
@@ -38,6 +40,9 @@ services:
       VOICE_BOT_STT_SERVICE_URL: "${VOICE_BOT_STT_SERVICE_URL:-http://172.17.0.1:8137}"
       VOICE_BOT_STT_SERVICE_TIMEOUT: "${VOICE_BOT_STT_SERVICE_TIMEOUT:-15}"
       VOICE_BOT_LOG_LEVEL: "INFO"
+      # Уровень для шумных библиотек (livekit, aiohttp, openai и т.п.).
+      VOICE_BOT_NOISY_LOG_LEVEL: "${VOICE_BOT_NOISY_LOG_LEVEL:-WARNING}"
+
     # dev-режим: воркер регистрируется на сервере и ждёт звонков.
     command: ["python", "-m", "voice_bot.agent.main", "dev"]
 

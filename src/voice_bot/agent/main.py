@@ -34,7 +34,10 @@ from voice_bot.scenario.prompt import build_system_prompt
 # .env загружаем в окружение ДО чтения настроек и инициализации плагинов:
 # плагины OpenAI/ElevenLabs читают ключи напрямую из переменных окружения.
 load_dotenv()
-setup_logging(os.getenv("VOICE_BOT_LOG_LEVEL", "INFO"))
+setup_logging(
+    os.getenv("VOICE_BOT_LOG_LEVEL", "INFO"),
+    os.getenv("VOICE_BOT_NOISY_LOG_LEVEL", "WARNING"),
+)
 logger = logging.getLogger("voice_bot")
 
 # Имя и режим подхвата читаем без полной валидации настроек, чтобы служебные

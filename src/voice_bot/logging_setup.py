@@ -1,20 +1,34 @@
-"""Настройка логирования для бота."""
+"""Настройка уровней логирования для бота.
+
+Обработчики вешает LiveKit CLI (``agents.cli.run_app``), причём делает это
+ПОСЛЕ импорта модулей и не очищает уже существующие. Поэтому свой обработчик
+мы не добавляем — иначе каждая запись печатается дважды. Здесь только уровни.
+"""
 
 import logging
-import sys
+
+#: Библиотеки, которые в DEBUG заваливают поток служебными событиями.
+_NOISY_LOGGERS = (
+    "livekit",
+    "livekit.agents",
+    "aiohttp",
+    "httpx",
+    "httpcore",
+    "openai",
+    "urllib3",
+    "asyncio",
+    "numba",
+)
 
 
-def setup_logging(level: str = "INFO") -> None:
-    """Настроить корневой логгер: единый формат, вывод в stdout.
-
-    Формат компактный и читаемый в контейнере — одна строка на событие.
+def setup_logging(level: str = "INFO", noisy_level: str = "WARNING") -> None:
+    """Выставить уровни логирования, не трогая обработчики.
 
     Args:
-        level: уровень логирования (``INFO``, ``DEBUG`` и т.д.).
+        level: уровень для логгеров проекта (``voice_bot`` и вложенные).
+        noisy_level: уровень для шумных библиотек — их служебные события
+            в поток не пускаем.
     """
-    logging.basicConfig(
-        level=level.upper(),
-        stream=sys.stdout,
-        format="%(asctime)s %(levelname)-7s %(name)s | %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    logging.getLogger("voice_bot").setLevel(level.upper())
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(noisy_level.upper())

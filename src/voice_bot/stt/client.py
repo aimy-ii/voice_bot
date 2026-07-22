@@ -69,6 +69,9 @@ class TranscriptionClient:
     async def transcribe(self, audio: PreparedAudio) -> str:
         """Отправить реплику в сервис и получить текст.
 
+        В лог попадает расшифровка речи звонящего — это персональные данные,
+        на проде срок хранения логов надо ограничивать.
+
         Args:
             audio: подготовленная реплика (сырой PCM и параметры потока).
 
@@ -105,12 +108,12 @@ class TranscriptionClient:
             ) from exc
 
         text = str(payload.get("text", "")).strip()
-        logger.debug(
-            "%s Реплика %.2fс → %d символов (сервис: %.3fс)",
+        logger.info(
+            "%s Клиент (%.2fс, распознано за %.3fс): %s",
             STT_LOG_PREFIX,
             audio.duration_seconds,
-            len(text),
             float(payload.get("elapsed_seconds", 0.0)),
+            text or "<тишина>",
         )
         return text
 

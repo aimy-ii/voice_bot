@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -161,3 +162,56 @@ async def test_is_ready_false_when_silent() -> None:
         assert await client.is_ready() is False
     finally:
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_transcribe_logs_recognized_text_at_info(
+    transcribe_server: tuple[str, dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """При успешном ответе сервиса в лог INFO попадает распознанный текст."""
+    base_url, _seen = transcribe_server
+    client = TranscriptionClient(base_url=base_url)
+    audio = PreparedAudio(pcm=b"\x01\x02\x03\x04", sample_rate=16_000, num_channels=1)
+
+    with caplog.at_level(logging.INFO, logger="voice_bot.stt"):
+        try:
+            await client.transcribe(audio)
+        finally:
+            await client.aclose()
+
+    assert "привет мир" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_transcribe_logs_silence_placeholder(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """При пустом тексте в логе появляется ``<тишина>``."""
+
+    async def handle_transcribe(_request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "text": "",
+                "language": "ru",
+                "duration_seconds": 0.1,
+                "elapsed_seconds": 0.001,
+                "model": "gigaam-v3",
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post(TRANSCRIBE_PCM_PATH, handle_transcribe)
+    runner, base_url = await _start_app(app)
+    client = TranscriptionClient(base_url=base_url)
+    audio = PreparedAudio(pcm=b"\x00\x00", sample_rate=8_000, num_channels=1)
+
+    try:
+        with caplog.at_level(logging.INFO, logger="voice_bot.stt"):
+            text = await client.transcribe(audio)
+    finally:
+        await client.aclose()
+        await runner.cleanup()
+
+    assert text == ""
+    assert "<тишина>" in caplog.text
