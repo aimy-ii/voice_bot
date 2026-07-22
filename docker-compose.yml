@@ -33,6 +33,10 @@ services:
       BG_ENABLED: "${BG_ENABLED:-true}"
       BG_AMBIENT_VOLUME: "${BG_AMBIENT_VOLUME:-0.4}"
       BG_THINKING_VOLUME: "${BG_THINKING_VOLUME:-0.6}"
+      # Распознавание речи: service — локальный транскрибатор, openai — облако.
+      VOICE_BOT_STT_PROVIDER: "${VOICE_BOT_STT_PROVIDER:-service}"
+      VOICE_BOT_STT_SERVICE_URL: "${VOICE_BOT_STT_SERVICE_URL:-http://172.17.0.1:8137}"
+      VOICE_BOT_STT_SERVICE_TIMEOUT: "${VOICE_BOT_STT_SERVICE_TIMEOUT:-15}"
       VOICE_BOT_LOG_LEVEL: "INFO"
     # dev-режим: воркер регистрируется на сервере и ждёт звонков.
     command: ["python", "-m", "voice_bot.agent.main", "dev"]

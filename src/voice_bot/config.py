@@ -6,6 +6,7 @@
 """
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -55,6 +56,18 @@ class Settings(BaseSettings):
     language: str = Field(default="ru", alias="VOICE_BOT_LANGUAGE")
     stt_model: str = Field(default="gpt-4o-mini-transcribe", alias="VOICE_BOT_STT_MODEL")
     llm_model: str = Field(default="gpt-4.1-mini", alias="VOICE_BOT_LLM_MODEL")
+
+    # --- Распознавание речи: облачный OpenAI или свой сервис ---
+    # "openai" — как было; "service" — локальный транскрибатор по HTTP.
+    stt_provider: Literal["openai", "service"] = Field(
+        default="openai", alias="VOICE_BOT_STT_PROVIDER"
+    )
+    # Сервис распознавания поднят отдельным стеком на том же сервере.
+    stt_service_url: str = Field(
+        default="http://172.17.0.1:8137", alias="VOICE_BOT_STT_SERVICE_URL"
+    )
+    # Сколько ждать ответа сервиса на одну реплику, секунды.
+    stt_service_timeout: float = Field(default=15.0, alias="VOICE_BOT_STT_SERVICE_TIMEOUT")
     agent_name: str = Field(default="voice-bot", alias="VOICE_BOT_AGENT_NAME")
     # true — автоподхват комнат (локальные тесты); false — только явный dispatch по имени.
     agent_auto_accept: bool = Field(default=True, alias="AGENT_AUTO_ACCEPT")
