@@ -12,8 +12,11 @@ download-files:  ## Скачать веса моделей (turn-detector и т.
 console:  ## Локальный тест агента в терминале (микрофон)
 	uv run python -m voice_bot.agent.main console
 
-dev:  ## Запустить воркер против LiveKit-сервера
+dev:  ## Запустить воркер против LiveKit-сервера (dev)
 	uv run python -m voice_bot.agent.main dev
+
+start:  ## Запустить воркер против LiveKit-сервера (prod)
+	uv run python -m voice_bot.agent.main start
 
 token:  ## JWT-токен для LiveKit Playground (stdout)
 	uv run python -m voice_bot.agent.token
@@ -45,4 +48,4 @@ down:  ## Остановить контейнеры
 logs:  ## Логи docker-стека (follow)
 	docker compose logs -f
 
-.PHONY: help install download-files console dev token lint format test check up play down logs
+.PHONY: help install download-files console dev start token lint format test check up play down logs

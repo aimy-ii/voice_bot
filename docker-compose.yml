@@ -39,12 +39,17 @@ services:
       VOICE_BOT_STT_PROVIDER: "${VOICE_BOT_STT_PROVIDER:-service}"
       VOICE_BOT_STT_SERVICE_URL: "${VOICE_BOT_STT_SERVICE_URL:-http://172.17.0.1:8137}"
       VOICE_BOT_STT_SERVICE_TIMEOUT: "${VOICE_BOT_STT_SERVICE_TIMEOUT:-15}"
+      # «Мозг»: openai — облако; agent — удалённый граф LangGraph на хосте.
+      VOICE_BOT_LLM_PROVIDER: "${VOICE_BOT_LLM_PROVIDER:-openai}"
+      VOICE_BOT_AGENT_URL: "${VOICE_BOT_AGENT_URL:-http://172.17.0.1:8127}"
+      VOICE_BOT_AGENT_GRAPH: "${VOICE_BOT_AGENT_GRAPH:-vector_agent}"
+      VOICE_BOT_AGENT_TIMEOUT: "${VOICE_BOT_AGENT_TIMEOUT:-30}"
       VOICE_BOT_LOG_LEVEL: "INFO"
       # Уровень для шумных библиотек (livekit, aiohttp, openai и т.п.).
       VOICE_BOT_NOISY_LOG_LEVEL: "${VOICE_BOT_NOISY_LOG_LEVEL:-WARNING}"
 
-    # dev-режим: воркер регистрируется на сервере и ждёт звонков.
-    command: ["python", "-m", "voice_bot.agent.main", "dev"]
+    # prod-режим: воркер регистрируется на сервере и ждёт звонков.
+    command: ["python", "-m", "voice_bot.agent.main", "start"]
 
   # Локальный веб-клиент: официальный agent-starter-react (сборка из git).
   # Сам выдаёт JWT через /api/token — ручной make token не нужен.

@@ -6,9 +6,9 @@
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,6 +68,33 @@ class Settings(BaseSettings):
     )
     # Сколько ждать ответа сервиса на одну реплику, секунды.
     stt_service_timeout: float = Field(default=15.0, alias="VOICE_BOT_STT_SERVICE_TIMEOUT")
+
+    # --- «Мозг»: облачный OpenAI или удалённый граф LangGraph ---
+    # "openai" — как было (поведение по умолчанию); "agent" — граф на LangGraph Server.
+    llm_provider: Literal["openai", "agent"] = Field(
+        default="openai", alias="VOICE_BOT_LLM_PROVIDER"
+    )
+    # Базовый URL агентского сервиса (отдельный стек на том же хосте).
+    agent_url: str = Field(default="http://172.17.0.1:8127", alias="VOICE_BOT_AGENT_URL")
+    # Имя графа из langgraph.json агентского сервиса.
+    agent_graph: str = Field(default="vector_agent", alias="VOICE_BOT_AGENT_GRAPH")
+    # Таймаут HTTP до графа, секунды (стриминговое соединение на весь ход).
+    agent_timeout: float = Field(default=30.0, alias="VOICE_BOT_AGENT_TIMEOUT")
+
+    # --- Предподготовка по промежуточному STT (вторая точка входа графа) ---
+    # Выключено по умолчанию: пока агент не готов, поведение как раньше.
+    agent_partial_enabled: bool = Field(default=False, alias="VOICE_BOT_AGENT_PARTIAL_ENABLED")
+    # URL второй точки входа (может совпадать с AGENT_URL).
+    agent_partial_url: str = Field(
+        default="http://172.17.0.1:8127", alias="VOICE_BOT_AGENT_PARTIAL_URL"
+    )
+    # Имя графа/ассистента предподготовки из langgraph.json.
+    agent_partial_graph: str = Field(
+        default="vector_partial", alias="VOICE_BOT_AGENT_PARTIAL_GRAPH"
+    )
+    # Таймаут HTTP на постановку фонового run (не ждём завершения графа).
+    agent_partial_timeout: float = Field(default=5.0, alias="VOICE_BOT_AGENT_PARTIAL_TIMEOUT")
+
     agent_name: str = Field(default="voice-bot", alias="VOICE_BOT_AGENT_NAME")
     # true — автоподхват комнат (локальные тесты); false — только явный dispatch по имени.
     agent_auto_accept: bool = Field(default=True, alias="AGENT_AUTO_ACCEPT")
@@ -79,6 +106,40 @@ class Settings(BaseSettings):
     # Эмбиент слышен, но не перекрывает голос (при 0.15 почти не слышно).
     bg_ambient_volume: float = Field(default=0.4, alias="BG_AMBIENT_VOLUME")
     bg_thinking_volume: float = Field(default=0.6, alias="BG_THINKING_VOLUME")
+
+    @model_validator(mode="after")
+    def _validate_agent_llm_settings(self) -> Self:
+        """Проверить обязательные поля при провайдере ``agent``.
+
+        Падаем на старте воркера, а не посреди звонка: без URL графа
+        собрать сессию всё равно нельзя.
+
+        Returns:
+            Те же настройки после проверки.
+
+        Raises:
+            ValueError: если ``llm_provider=agent``, а ``agent_url`` пуст;
+                либо если включена предподготовка без URL/имени графа.
+        """
+        if self.llm_provider == "agent" and not self.agent_url.strip():
+            raise ValueError(
+                "VOICE_BOT_AGENT_URL обязателен при VOICE_BOT_LLM_PROVIDER=agent: "
+                "без URL нельзя подключить удалённый граф"
+            )
+        if self.agent_partial_enabled:
+            if not self.agent_partial_url.strip():
+                raise ValueError(
+                    "VOICE_BOT_AGENT_PARTIAL_URL обязателен при "
+                    "VOICE_BOT_AGENT_PARTIAL_ENABLED=true: без URL нельзя "
+                    "слать промежуточный текст на вторую точку входа"
+                )
+            if not self.agent_partial_graph.strip():
+                raise ValueError(
+                    "VOICE_BOT_AGENT_PARTIAL_GRAPH обязателен при "
+                    "VOICE_BOT_AGENT_PARTIAL_ENABLED=true: без имени графа "
+                    "нельзя вызвать вторую точку входа"
+                )
+        return self
 
     @property
     def proxy_url(self) -> str | None:

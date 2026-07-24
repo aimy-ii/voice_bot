@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Голосовой бот для звонков по скрипту (LiveKit + OpenAI + ElevenLabs)"
 requires-python = ">=3.11"
 dependencies = [
-    "livekit-agents[openai,elevenlabs,silero,turn-detector]~=1.4",
+    "livekit-agents[openai,elevenlabs,silero,turn-detector,langchain]~=1.4",
     "pydantic~=2.9",
     "pydantic-settings~=2.5",
     "python-dotenv~=1.0",
