@@ -230,13 +230,15 @@ def test_agent_partial_defaults_disabled(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_URL", raising=False)
     monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_GRAPH", raising=False)
     monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_TIMEOUT", raising=False)
+    monkeypatch.delenv("VOICE_BOT_AGENT_MAIN_MULTITASK", raising=False)
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.agent_partial_enabled is False
     assert settings.agent_partial_url == "http://172.17.0.1:8127"
-    assert settings.agent_partial_graph == "vector_partial"
+    assert settings.agent_partial_graph == "vector_checker"
     assert settings.agent_partial_timeout == 5.0
+    assert settings.agent_main_multitask == ""
 
 
 def test_agent_partial_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,6 +255,20 @@ def test_agent_partial_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.agent_partial_url == "http://agent.test:8127"
     assert settings.agent_partial_graph == "my_partial"
     assert settings.agent_partial_timeout == 3.5
+
+
+def test_agent_partial_enabled_ok_with_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """enabled=true с дефолтными URL и именем графа — валидатор проходит."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_AGENT_PARTIAL_ENABLED", "true")
+    monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_URL", raising=False)
+    monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_GRAPH", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.agent_partial_enabled is True
+    assert settings.agent_partial_url.strip()
+    assert settings.agent_partial_graph == "vector_checker"
 
 
 def test_agent_partial_requires_url_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,6 +293,16 @@ def test_agent_partial_requires_graph_when_enabled(monkeypatch: pytest.MonkeyPat
 
     with pytest.raises(ValidationError, match="VOICE_BOT_AGENT_PARTIAL_GRAPH"):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_agent_main_multitask_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VOICE_BOT_AGENT_MAIN_MULTITASK читается как точка расширения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_AGENT_MAIN_MULTITASK", "interrupt")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.agent_main_multitask == "interrupt"
 
 
 def test_llm_provider_agent_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

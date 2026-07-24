@@ -83,17 +83,23 @@ class Settings(BaseSettings):
 
     # --- Предподготовка по промежуточному STT (вторая точка входа графа) ---
     # Выключено по умолчанию: пока агент не готов, поведение как раньше.
+    # На стенде с живым чекером — VOICE_BOT_AGENT_PARTIAL_ENABLED=true.
     agent_partial_enabled: bool = Field(default=False, alias="VOICE_BOT_AGENT_PARTIAL_ENABLED")
     # URL второй точки входа (может совпадать с AGENT_URL).
     agent_partial_url: str = Field(
         default="http://172.17.0.1:8127", alias="VOICE_BOT_AGENT_PARTIAL_URL"
     )
-    # Имя графа/ассистента предподготовки из langgraph.json.
+    # Имя графа/ассистента предподготовки из langgraph.json агента.
     agent_partial_graph: str = Field(
-        default="vector_partial", alias="VOICE_BOT_AGENT_PARTIAL_GRAPH"
+        default="vector_checker", alias="VOICE_BOT_AGENT_PARTIAL_GRAPH"
     )
     # Таймаут HTTP на постановку фонового run (не ждём завершения графа).
     agent_partial_timeout: float = Field(default=5.0, alias="VOICE_BOT_AGENT_PARTIAL_TIMEOUT")
+    # Стратегия multitask основного хода (точка расширения). Пусто — не задаём:
+    # LLMAdapter/RemoteGraph плагина LiveKit сейчас не пробрасывают
+    # multitask_strategy в runs.stream, поэтому отмена служебного
+    # vector_checker живым ходом пока не гарантирована.
+    agent_main_multitask: str = Field(default="", alias="VOICE_BOT_AGENT_MAIN_MULTITASK")
 
     agent_name: str = Field(default="voice-bot", alias="VOICE_BOT_AGENT_NAME")
     # true — автоподхват комнат (локальные тесты); false — только явный dispatch по имени.

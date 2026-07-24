@@ -40,7 +40,7 @@ def _make_sender(*, create: AsyncMock | None = None) -> tuple[PartialTranscriptS
     client.runs.create = runs_create
     sender = PartialTranscriptSender(
         client=client,
-        graph="vector_partial",
+        graph="vector_checker",
         thread_id=thread_id_for_room("room-partial"),
     )
     return sender, runs_create
@@ -68,6 +68,22 @@ async def test_partial_disabled_attach_does_nothing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_partial_send_payload_graph_and_field() -> None:
+    """``_send`` уходит на ``vector_checker`` с текстом в ``partial_reply``."""
+    sender, runs_create = _make_sender()
+
+    sender.on_transcript(UserInputTranscribedEvent(transcript="проверка", is_final=False))
+    await _drain(sender)
+
+    assert runs_create.await_count == 1
+    kwargs = runs_create.await_args.kwargs
+    assert kwargs["assistant_id"] == "vector_checker"
+    assert kwargs["input"] == {"partial_reply": "проверка"}
+    assert kwargs["multitask_strategy"] == "interrupt"
+    assert kwargs["if_not_exists"] == "create"
+
+
+@pytest.mark.asyncio
 async def test_partial_sends_accumulated_text_not_delta() -> None:
     """Уходит накопленный текст целиком, а не приращение к прошлому куску."""
     sender, runs_create = _make_sender()
@@ -80,11 +96,13 @@ async def test_partial_sends_accumulated_text_not_delta() -> None:
     await _drain(sender)
 
     assert runs_create.await_count == 3
-    sent = [call.kwargs["input"]["messages"][0]["content"] for call in runs_create.await_args_list]
+    sent = [call.kwargs["input"]["partial_reply"] for call in runs_create.await_args_list]
     assert sent == ["привет", "привет как", "привет как дела"]
     # Не дельта: последний вызов — полная фраза, не « дела».
     assert sent[-1] == "привет как дела"
     assert sent[-1] != " дела"
+    # Каждый служебный run прерывает предыдущий.
+    assert all(c.kwargs["multitask_strategy"] == "interrupt" for c in runs_create.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -97,7 +115,7 @@ async def test_partial_combines_final_segments_with_interim() -> None:
     sender.on_transcript(UserInputTranscribedEvent(transcript="Иван", is_final=False))
     await _drain(sender)
 
-    sent = [call.kwargs["input"]["messages"][0]["content"] for call in runs_create.await_args_list]
+    sent = [call.kwargs["input"]["partial_reply"] for call in runs_create.await_args_list]
     assert sent == ["меня зовут", "меня зовут Иван"]
 
 
@@ -142,7 +160,7 @@ async def test_partial_thread_id_matches_main_turn() -> None:
     settings = _settings(
         VOICE_BOT_AGENT_PARTIAL_ENABLED="true",
         VOICE_BOT_AGENT_PARTIAL_URL="http://agent.test:8127",
-        VOICE_BOT_AGENT_PARTIAL_GRAPH="vector_partial",
+        VOICE_BOT_AGENT_PARTIAL_GRAPH="vector_checker",
     )
 
     with patch.object(session_module.httpx, "AsyncClient", return_value=MagicMock()):
@@ -157,7 +175,8 @@ async def test_partial_thread_id_matches_main_turn() -> None:
     await _drain(sender)
 
     assert runs_create.await_args.kwargs["thread_id"] == expected
-    assert runs_create.await_args.kwargs["assistant_id"] == "vector_partial"
+    assert runs_create.await_args.kwargs["assistant_id"] == "vector_checker"
+    assert runs_create.await_args.kwargs["input"] == {"partial_reply": "ок"}
 
 
 @pytest.mark.asyncio
@@ -179,7 +198,7 @@ async def test_partial_stops_after_main_turn_starts() -> None:
     sender.on_transcript(UserInputTranscribedEvent(transcript="новая фраза", is_final=False))
     await _drain(sender)
     assert runs_create.await_count == 2
-    assert runs_create.await_args.kwargs["input"]["messages"][0]["content"] == "новая фраза"
+    assert runs_create.await_args.kwargs["input"]["partial_reply"] == "новая фраза"
 
 
 def test_attach_partial_when_enabled_subscribes() -> None:
@@ -187,7 +206,7 @@ def test_attach_partial_when_enabled_subscribes() -> None:
     settings = _settings(
         VOICE_BOT_AGENT_PARTIAL_ENABLED="true",
         VOICE_BOT_AGENT_PARTIAL_URL="http://agent.test:8127",
-        VOICE_BOT_AGENT_PARTIAL_GRAPH="vector_partial",
+        VOICE_BOT_AGENT_PARTIAL_GRAPH="vector_checker",
     )
     session = MagicMock()
     fake_sender = MagicMock()

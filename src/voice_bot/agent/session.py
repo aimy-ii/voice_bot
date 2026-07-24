@@ -80,13 +80,15 @@ def thread_id_for_room(room_name: str) -> str:
 
 
 class PartialTranscriptSender:
-    """Фоновая отправка накопленного STT на вторую точку входа графа.
+    """Фоновая отправка накопленного STT на служебный граф ``vector_checker``.
 
     Слушает ``user_input_transcribed`` сессии LiveKit: туда уже приходит
     и промежуточный, и финальный текст, без вмешательства в конвейер STT.
-    Каждый раз уходит **весь** накопленный текст реплики, не дельта.
-    HTTP ставится через ``asyncio.create_task`` — обработчик хода не ждёт
-    ответа; ошибки и таймауты только в лог.
+    Каждый раз уходит **весь** накопленный текст реплики в поле
+    ``partial_reply``, не дельта. HTTP ставится через
+    ``asyncio.create_task`` — обработчик хода не ждёт ответа; ошибки и
+    таймауты только в лог. Служебные run идут со
+    ``multitask_strategy="interrupt"``.
 
     После перехода агента в ``thinking`` (основной ход) отправка
     прекращается до начала следующей реплики клиента.
@@ -219,7 +221,11 @@ class PartialTranscriptSender:
             )
 
     async def _send(self, text: str) -> None:
-        """Поставить фоновый run на вторую точку входа; ответ не читаем.
+        """Поставить фоновый run на ``vector_checker``; ответ не читаем.
+
+        Граф читает накопленный текст из ``partial_reply``. Новый служебный
+        проход идёт со ``multitask_strategy="interrupt"``: незавершённый
+        предыдущий на том же треде отменяется.
 
         Args:
             text: накопленный распознанный текст целиком.
@@ -228,7 +234,7 @@ class PartialTranscriptSender:
             await self._client.runs.create(
                 thread_id=self._thread_id,
                 assistant_id=self._graph,
-                input={"messages": [{"role": "user", "content": text}]},
+                input={"partial_reply": text},
                 if_not_exists="create",
                 # Свежий кусок важнее очереди устаревших гипотез.
                 multitask_strategy="interrupt",
@@ -363,9 +369,18 @@ def _build_agent_llm(*, settings: Settings, room_name: str) -> llm_module.LLM:
     словарь с ``content``); служебные события без ``content`` отбрасываются.
 
     ``thread_id`` фиксируется в конструкторе ``LLMAdapter``, поэтому адаптер
-    создаётся на каждый звонок. HTTP-клиент к графу — с ``trust_env=False``:
-    в окружении воркера задан SOCKS5-прокси для ElevenLabs/OpenAI, а агентский
-    сервис живёт на том же хосте и в прокси заворачивать нельзя.
+    создаётся на каждый звонок. Тот же UUID (``thread_id_for_room``) использует
+    служебный ``PartialTranscriptSender`` / ``vector_checker``.
+
+    ``VOICE_BOT_AGENT_MAIN_MULTITASK`` зарезервирован как точка расширения:
+    ``LLMAdapter`` плагина LiveKit не принимает и не пробрасывает
+    ``multitask_strategy`` в ``RemoteGraph.astream`` / ``runs.stream``.
+    Пока плагин не доработан, старт основного хода **не гарантирует**
+    отмену идущего служебного ``vector_checker`` (возможен ``enqueue``).
+
+    HTTP-клиент к графу — с ``trust_env=False``: в окружении воркера задан
+    SOCKS5-прокси для ElevenLabs/OpenAI, а агентский сервис живёт на том
+    же хосте и в прокси заворачивать нельзя.
 
     Args:
         settings: настройки с URL, именем графа и таймаутом.
