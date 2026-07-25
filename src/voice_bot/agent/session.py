@@ -253,11 +253,8 @@ class PartialTranscriptSender:
                 response, "reason", None
             )
             if status is not None:
-                detail = f"код={status}"
-                if reason:
-                    detail = f"{detail}, {reason}"
-                else:
-                    detail = f"{detail}, {type(exc).__name__}"
+                suffix = reason if reason else type(exc).__name__
+                detail = f"код={status}, {suffix}"
                 logger.info("[live] отправка в %s: ошибка (%s)", self._graph, detail)
             else:
                 logger.info(

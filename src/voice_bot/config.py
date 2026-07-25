@@ -84,11 +84,11 @@ class Settings(BaseSettings):
     # --- Живой режим: предподготовка по промежуточному STT (vector_checker) ---
     # Выключено по умолчанию (безопасно). На стенде — окружением:
     # VOICE_BOT_AGENT_PARTIAL_ENABLED=true (чекер + контекстер, пока клиент говорит).
+    # При enabled=true нужны непустые URL и GRAPH — иначе падаем на старте.
     agent_partial_enabled: bool = Field(default=False, alias="VOICE_BOT_AGENT_PARTIAL_ENABLED")
-    # URL LangGraph-сервера агента (вторая точка входа; может совпадать с AGENT_URL).
-    agent_partial_url: str = Field(
-        default="http://172.17.0.1:8127", alias="VOICE_BOT_AGENT_PARTIAL_URL"
-    )
+    # URL LangGraph-сервера агента (мозга). Пустой дефолт: в бою нельзя молча
+    # уехать на «чужой» адрес — URL задают явно в .env.
+    agent_partial_url: str = Field(default="", alias="VOICE_BOT_AGENT_PARTIAL_URL")
     # Имя служебного графа из langgraph.json агента.
     agent_partial_graph: str = Field(
         default="vector_checker", alias="VOICE_BOT_AGENT_PARTIAL_GRAPH"
@@ -114,36 +114,64 @@ class Settings(BaseSettings):
     bg_thinking_volume: float = Field(default=0.6, alias="BG_THINKING_VOLUME")
 
     @model_validator(mode="after")
-    def _validate_agent_llm_settings(self) -> Self:
-        """Проверить обязательные поля при провайдере ``agent``.
+    def _validate_required_settings(self) -> Self:
+        """Проверить обязательные поля: пустые строки ловим на старте.
 
-        Падаем на старте воркера, а не посреди звонка: без URL графа
-        собрать сессию всё равно нельзя.
+        Pydantic требует наличие переменной без дефолта, но пустая строка
+        из окружения (``VAR=``) проходит как валидное значение — из‑за этого
+        в бою бот мог молча не слать в служебный граф. Здесь явно падаем.
 
         Returns:
             Те же настройки после проверки.
 
         Raises:
-            ValueError: если ``llm_provider=agent``, а ``agent_url`` пуст;
-                либо если включена предподготовка без URL/имени графа.
+            ValueError: если обязательный секрет/URL пуст; если при
+                ``llm_provider=agent`` / ``stt_provider=service`` не заданы
+                адреса; если живой режим включён без URL/имени графа.
         """
-        if self.llm_provider == "agent" and not self.agent_url.strip():
+        required_non_empty: tuple[tuple[str, str], ...] = (
+            ("LIVEKIT_URL", self.livekit_url),
+            ("LIVEKIT_API_KEY", self.livekit_api_key),
+            ("LIVEKIT_API_SECRET", self.livekit_api_secret),
+            ("OPENAI_API_KEY", self.openai_api_key),
+            ("ELEVENLABS_API_KEY", self.elevenlabs_api_key),
+            ("ELEVENLABS_VOICE_ID", self.elevenlabs_voice_id),
+        )
+        for env_name, value in required_non_empty:
+            if not value.strip():
+                raise ValueError(
+                    f"{env_name} обязателен: пустое значение недопустимо "
+                    "(задайте в окружении или .env)"
+                )
+
+        if self.llm_provider == "agent":
+            if not self.agent_url.strip():
+                raise ValueError(
+                    "VOICE_BOT_AGENT_URL обязателен при VOICE_BOT_LLM_PROVIDER=agent: "
+                    "без URL нельзя подключить удалённый граф"
+                )
+            if not self.agent_graph.strip():
+                raise ValueError(
+                    "VOICE_BOT_AGENT_GRAPH обязателен при VOICE_BOT_LLM_PROVIDER=agent: "
+                    "без имени графа нельзя подключить удалённый мозг"
+                )
+
+        if self.stt_provider == "service" and not self.stt_service_url.strip():
             raise ValueError(
-                "VOICE_BOT_AGENT_URL обязателен при VOICE_BOT_LLM_PROVIDER=agent: "
-                "без URL нельзя подключить удалённый граф"
+                "VOICE_BOT_STT_SERVICE_URL обязателен при VOICE_BOT_STT_PROVIDER=service: "
+                "без URL нельзя вызвать сервис распознавания"
             )
+
         if self.agent_partial_enabled:
             if not self.agent_partial_url.strip():
                 raise ValueError(
-                    "VOICE_BOT_AGENT_PARTIAL_URL обязателен при "
-                    "VOICE_BOT_AGENT_PARTIAL_ENABLED=true: без URL нельзя "
-                    "слать промежуточный текст на вторую точку входа"
+                    "Живой режим включён (VOICE_BOT_AGENT_PARTIAL_ENABLED=true), "
+                    "но не задан VOICE_BOT_AGENT_PARTIAL_URL"
                 )
             if not self.agent_partial_graph.strip():
                 raise ValueError(
-                    "VOICE_BOT_AGENT_PARTIAL_GRAPH обязателен при "
-                    "VOICE_BOT_AGENT_PARTIAL_ENABLED=true: без имени графа "
-                    "нельзя вызвать вторую точку входа"
+                    "Живой режим включён (VOICE_BOT_AGENT_PARTIAL_ENABLED=true), "
+                    "но не задан VOICE_BOT_AGENT_PARTIAL_GRAPH"
                 )
         return self
 
