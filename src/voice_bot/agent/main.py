@@ -12,6 +12,7 @@
 
 import logging
 import os
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -160,6 +161,18 @@ def _attach_latency_logging(session: AgentSession) -> None:
         _log_assistant_latency(ev.item)
 
 
+def _partial_url_host(url: str) -> str:
+    """Host[:port] из URL без query/фрагмента и токенов.
+
+    Args:
+        url: полный URL второй точки входа (может содержать секреты в query).
+
+    Returns:
+        Только ``netloc`` (например ``172.17.0.1:8127``), иначе исходная строка.
+    """
+    return urlparse(url).netloc or url
+
+
 def _attach_partial_transcript_sender(
     session: AgentSession,
     *,
@@ -176,17 +189,23 @@ def _attach_partial_transcript_sender(
         settings: настройки с флагом и адресом второй точки входа.
         room_name: имя комнаты LiveKit для того же ``thread_id``, что у хода.
     """
-    if not settings.agent_partial_enabled:
+    enabled = settings.agent_partial_enabled
+    logger.info(
+        "[live] прогрев: enabled=%s, граф=%s, url=%s",
+        str(enabled).lower(),
+        settings.agent_partial_graph,
+        _partial_url_host(settings.agent_partial_url),
+    )
+    if not enabled:
+        logger.info("[live] фоновая отправка ВЫКЛЮЧЕНА")
+        logger.info(
+            "[live] сендер не подписан: живой режим выключен "
+            "(VOICE_BOT_AGENT_PARTIAL_ENABLED=false)"
+        )
         return
 
     sender = build_partial_transcript_sender(settings=settings, room_name=room_name)
     sender.attach(session)
-    logger.info(
-        "Partial STT → %s/%s (thread_id=%s)",
-        settings.agent_partial_url.rstrip("/"),
-        settings.agent_partial_graph,
-        sender.thread_id,
-    )
 
 
 async def _start_background_audio(

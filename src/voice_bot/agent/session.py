@@ -230,6 +230,13 @@ class PartialTranscriptSender:
         Args:
             text: накопленный распознанный текст целиком.
         """
+        preview = text[:40]
+        logger.info(
+            "[live] отправка в %s: %d симв., «%s»",
+            self._graph,
+            len(text),
+            preview,
+        )
         try:
             await self._client.runs.create(
                 thread_id=self._thread_id,
@@ -240,12 +247,33 @@ class PartialTranscriptSender:
                 multitask_strategy="interrupt",
             )
         except Exception as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            reason = getattr(response, "reason_phrase", None) or getattr(
+                response, "reason", None
+            )
+            if status is not None:
+                detail = f"код={status}"
+                if reason:
+                    detail = f"{detail}, {reason}"
+                else:
+                    detail = f"{detail}, {type(exc).__name__}"
+                logger.info("[live] отправка в %s: ошибка (%s)", self._graph, detail)
+            else:
+                logger.info(
+                    "[live] отправка в %s: ошибка (%s: %s)",
+                    self._graph,
+                    type(exc).__name__,
+                    str(exc)[:120],
+                )
             logger.warning(
                 "Не удалось отправить partial-текст на %s (thread_id=%s): %s",
                 self._graph,
                 self._thread_id,
                 exc,
             )
+            return
+        logger.info("[live] отправка в %s: успех", self._graph)
 
 
 def build_partial_transcript_sender(
