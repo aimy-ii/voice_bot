@@ -44,6 +44,11 @@ services:
       VOICE_BOT_AGENT_URL: "${VOICE_BOT_AGENT_URL:-http://172.17.0.1:8127}"
       VOICE_BOT_AGENT_GRAPH: "${VOICE_BOT_AGENT_GRAPH:-vector_agent}"
       VOICE_BOT_AGENT_TIMEOUT: "${VOICE_BOT_AGENT_TIMEOUT:-30}"
+      # Живой режим: фоновый прогрев чекера/контекстера. При enabled=true
+      # нужны непустые URL и GRAPH — иначе воркер падает на старте.
+      VOICE_BOT_AGENT_PARTIAL_ENABLED: "${VOICE_BOT_AGENT_PARTIAL_ENABLED:-false}"
+      VOICE_BOT_AGENT_PARTIAL_URL: "${VOICE_BOT_AGENT_PARTIAL_URL:-}"
+      VOICE_BOT_AGENT_PARTIAL_GRAPH: "${VOICE_BOT_AGENT_PARTIAL_GRAPH:-vector_checker}"
       VOICE_BOT_LOG_LEVEL: "INFO"
       # Уровень для шумных библиотек (livekit, aiohttp, openai и т.п.).
       VOICE_BOT_NOISY_LOG_LEVEL: "${VOICE_BOT_NOISY_LOG_LEVEL:-WARNING}"

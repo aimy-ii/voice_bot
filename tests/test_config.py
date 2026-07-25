@@ -224,19 +224,21 @@ def test_llm_provider_defaults_to_openai(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_agent_partial_defaults_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Без VOICE_BOT_AGENT_PARTIAL_* — предподготовка выключена."""
+    """Без VOICE_BOT_AGENT_PARTIAL_* — предподготовка выключена, URL пустой."""
     _set_required_env(monkeypatch)
     monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_ENABLED", raising=False)
     monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_URL", raising=False)
     monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_GRAPH", raising=False)
     monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_TIMEOUT", raising=False)
+    monkeypatch.delenv("VOICE_BOT_AGENT_MAIN_MULTITASK", raising=False)
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.agent_partial_enabled is False
-    assert settings.agent_partial_url == "http://172.17.0.1:8127"
-    assert settings.agent_partial_graph == "vector_partial"
+    assert settings.agent_partial_url == ""
+    assert settings.agent_partial_graph == "vector_checker"
     assert settings.agent_partial_timeout == 5.0
+    assert settings.agent_main_multitask == ""
 
 
 def test_agent_partial_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,6 +257,20 @@ def test_agent_partial_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.agent_partial_timeout == 3.5
 
 
+def test_agent_partial_enabled_ok_with_url_and_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """enabled=true с явным URL и дефолтным именем графа — валидатор проходит."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_AGENT_PARTIAL_ENABLED", "true")
+    monkeypatch.setenv("VOICE_BOT_AGENT_PARTIAL_URL", "http://vector-agent-api:8000")
+    monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_GRAPH", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.agent_partial_enabled is True
+    assert settings.agent_partial_url == "http://vector-agent-api:8000"
+    assert settings.agent_partial_graph == "vector_checker"
+
+
 def test_agent_partial_requires_url_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Пустой PARTIAL_URL при включённом флаге — ошибка на настройках."""
     from pydantic import ValidationError
@@ -267,16 +283,79 @@ def test_agent_partial_requires_url_when_enabled(monkeypatch: pytest.MonkeyPatch
         Settings(_env_file=None)  # type: ignore[call-arg]
 
 
+def test_agent_partial_requires_url_when_enabled_and_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """enabled=true без PARTIAL_URL в окружении (дефолт пустой) — ошибка."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_AGENT_PARTIAL_ENABLED", "true")
+    monkeypatch.delenv("VOICE_BOT_AGENT_PARTIAL_URL", raising=False)
+
+    with pytest.raises(ValidationError, match="VOICE_BOT_AGENT_PARTIAL_URL"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
 def test_agent_partial_requires_graph_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Пустой PARTIAL_GRAPH при включённом флаге — ошибка на настройках."""
     from pydantic import ValidationError
 
     _set_required_env(monkeypatch)
     monkeypatch.setenv("VOICE_BOT_AGENT_PARTIAL_ENABLED", "true")
+    monkeypatch.setenv("VOICE_BOT_AGENT_PARTIAL_URL", "http://agent.test:8127")
     monkeypatch.setenv("VOICE_BOT_AGENT_PARTIAL_GRAPH", "")
 
     with pytest.raises(ValidationError, match="VOICE_BOT_AGENT_PARTIAL_GRAPH"):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_empty_required_secret_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пустой OPENAI_API_KEY (VAR=) — понятная ошибка, не тихий старт."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+
+    with pytest.raises(ValidationError, match="OPENAI_API_KEY"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_stt_service_url_required_when_provider_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Пустой STT_SERVICE_URL при provider=service — ошибка на настройках."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_STT_PROVIDER", "service")
+    monkeypatch.setenv("VOICE_BOT_STT_SERVICE_URL", "")
+
+    with pytest.raises(ValidationError, match="VOICE_BOT_STT_SERVICE_URL"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_agent_graph_required_when_provider_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пустой AGENT_GRAPH при provider=agent — ошибка на настройках."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_LLM_PROVIDER", "agent")
+    monkeypatch.setenv("VOICE_BOT_AGENT_URL", "http://172.17.0.1:8127")
+    monkeypatch.setenv("VOICE_BOT_AGENT_GRAPH", "")
+
+    with pytest.raises(ValidationError, match="VOICE_BOT_AGENT_GRAPH"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_agent_main_multitask_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VOICE_BOT_AGENT_MAIN_MULTITASK читается как точка расширения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_AGENT_MAIN_MULTITASK", "interrupt")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.agent_main_multitask == "interrupt"
 
 
 def test_llm_provider_agent_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
