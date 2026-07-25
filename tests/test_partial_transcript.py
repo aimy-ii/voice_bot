@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from livekit.agents import (
-    AgentStateChangedEvent,
-    UserInputTranscribedEvent,
-    UserStateChangedEvent,
-)
+from livekit.agents import UserInputTranscribedEvent, UserStateChangedEvent
 
 from voice_bot.agent import main as main_module
 from voice_bot.agent import session as session_module
-from voice_bot.agent.session import PartialTranscriptSender, thread_id_for_room
+from voice_bot.agent.session import (
+    PartialTranscriptSender,
+    live_thread_id_for_room,
+    thread_id_for_room,
+)
 from voice_bot.config import Settings
 
 
@@ -38,10 +39,12 @@ def _make_sender(*, create: AsyncMock | None = None) -> tuple[PartialTranscriptS
     runs_create = create or AsyncMock(return_value={"run_id": "r1"})
     client = MagicMock()
     client.runs.create = runs_create
+    room = "room-partial"
     sender = PartialTranscriptSender(
         client=client,
         graph="vector_checker",
-        thread_id=thread_id_for_room("room-partial"),
+        thread_id=live_thread_id_for_room(room),
+        call_id=thread_id_for_room(room),
     )
     return sender, runs_create
 
@@ -50,6 +53,34 @@ async def _drain(sender: PartialTranscriptSender) -> None:
     """Дождаться фоновых задач отправки."""
     if sender._tasks:
         await asyncio.gather(*list(sender._tasks), return_exceptions=True)
+
+
+def test_live_thread_id_for_room_returns_valid_uuid() -> None:
+    """Лайв-тред — валидный UUID, принимаемый LangGraph Server."""
+    live_id = live_thread_id_for_room("voice_assistant_room_5285")
+    parsed = uuid.UUID(live_id)
+    assert str(parsed) == live_id
+
+
+def test_live_thread_id_differs_from_main_thread() -> None:
+    """Лайв-тред и основной тред одной комнаты не совпадают."""
+    room = "voice_assistant_room_42"
+    assert live_thread_id_for_room(room) != thread_id_for_room(room)
+
+
+def test_live_thread_id_is_deterministic_and_differs_by_room() -> None:
+    """Одна комната — один лайв-тред; разные комнаты — разные."""
+    room = "room-stable"
+    assert live_thread_id_for_room(room) == live_thread_id_for_room(room)
+    assert live_thread_id_for_room("room-a") != live_thread_id_for_room("room-b")
+
+
+def test_live_thread_id_rejects_empty() -> None:
+    """Пустое имя комнаты для лайв-треда — ValueError."""
+    with pytest.raises(ValueError):
+        live_thread_id_for_room("")
+    with pytest.raises(ValueError):
+        live_thread_id_for_room("   ")
 
 
 @pytest.mark.asyncio
@@ -81,6 +112,7 @@ async def test_partial_send_payload_graph_and_field() -> None:
     assert kwargs["input"] == {"partial_reply": "проверка"}
     assert kwargs["multitask_strategy"] == "interrupt"
     assert kwargs["if_not_exists"] == "create"
+    assert kwargs["config"] == {"configurable": {"call_id": sender.call_id}}
 
 
 @pytest.mark.asyncio
@@ -120,6 +152,18 @@ async def test_partial_combines_final_segments_with_interim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_partial_sends_on_final_transcript() -> None:
+    """``is_final=True`` — отправка происходит."""
+    sender, runs_create = _make_sender()
+
+    sender.on_transcript(UserInputTranscribedEvent(transcript="финальная реплика", is_final=True))
+    await _drain(sender)
+
+    assert runs_create.await_count == 1
+    assert runs_create.await_args.kwargs["input"]["partial_reply"] == "финальная реплика"
+
+
+@pytest.mark.asyncio
 async def test_partial_send_error_does_not_block_or_raise(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -153,10 +197,11 @@ async def test_partial_send_error_does_not_block_or_raise(
 
 
 @pytest.mark.asyncio
-async def test_partial_thread_id_matches_main_turn() -> None:
-    """``thread_id`` отправки совпадает с ``thread_id`` основного хода."""
+async def test_partial_uses_live_thread_and_call_id() -> None:
+    """Служебный run — на лайв-треде; ``call_id`` равен треду основного хода."""
     room = "voice_assistant_room_42"
-    expected = thread_id_for_room(room)
+    main_thread = thread_id_for_room(room)
+    live_thread = live_thread_id_for_room(room)
     settings = _settings(
         VOICE_BOT_AGENT_PARTIAL_ENABLED="true",
         VOICE_BOT_AGENT_PARTIAL_URL="http://agent.test:8127",
@@ -166,38 +211,45 @@ async def test_partial_thread_id_matches_main_turn() -> None:
     with patch.object(session_module.httpx, "AsyncClient", return_value=MagicMock()):
         sender = session_module.build_partial_transcript_sender(settings=settings, room_name=room)
 
-    assert sender.thread_id == expected
+    assert sender.thread_id == live_thread
+    assert sender.call_id == main_thread
+    assert sender.thread_id != sender.call_id
 
-    # Тот же UUID, что кладётся в LLMAdapter при llm_provider=agent.
     runs_create = AsyncMock(return_value={})
     sender._client.runs.create = runs_create
     sender.on_transcript(UserInputTranscribedEvent(transcript="ок", is_final=False))
     await _drain(sender)
 
-    assert runs_create.await_args.kwargs["thread_id"] == expected
-    assert runs_create.await_args.kwargs["assistant_id"] == "vector_checker"
-    assert runs_create.await_args.kwargs["input"] == {"partial_reply": "ок"}
+    kwargs = runs_create.await_args.kwargs
+    assert kwargs["thread_id"] == live_thread
+    assert kwargs["thread_id"] != main_thread
+    assert kwargs["config"] == {"configurable": {"call_id": main_thread}}
+    assert kwargs["assistant_id"] == "vector_checker"
+    assert kwargs["input"] == {"partial_reply": "ок"}
+    assert kwargs["multitask_strategy"] == "interrupt"
 
 
 @pytest.mark.asyncio
-async def test_partial_stops_after_main_turn_starts() -> None:
-    """После перехода агента в thinking отправка кусков прекращается."""
+async def test_partial_keeps_sending_while_agent_thinking() -> None:
+    """Переход агента в thinking не останавливает лайв-отправку."""
     sender, runs_create = _make_sender()
 
     sender.on_transcript(UserInputTranscribedEvent(transcript="пока говорю", is_final=False))
     await _drain(sender)
     assert runs_create.await_count == 1
 
-    sender.on_agent_state(AgentStateChangedEvent(old_state="listening", new_state="thinking"))
-    sender.on_transcript(UserInputTranscribedEvent(transcript="уже поздно", is_final=False))
+    # Подписки и обработчика agent_state больше нет — thinking не глушит канал.
+    assert not hasattr(sender, "on_agent_state")
+    sender.on_transcript(UserInputTranscribedEvent(transcript="уже думает", is_final=False))
     await _drain(sender)
-    assert runs_create.await_count == 1
+    assert runs_create.await_count == 2
+    assert runs_create.await_args.kwargs["input"]["partial_reply"] == "уже думает"
 
-    # Новая реплика клиента снова включает отправку.
+    # Новая реплика клиента по-прежнему сбрасывает буфер.
     sender.on_user_state(UserStateChangedEvent(old_state="listening", new_state="speaking"))
     sender.on_transcript(UserInputTranscribedEvent(transcript="новая фраза", is_final=False))
     await _drain(sender)
-    assert runs_create.await_count == 2
+    assert runs_create.await_count == 3
     assert runs_create.await_args.kwargs["input"]["partial_reply"] == "новая фраза"
 
 
@@ -210,7 +262,8 @@ def test_attach_partial_when_enabled_subscribes() -> None:
     )
     session = MagicMock()
     fake_sender = MagicMock()
-    fake_sender.thread_id = thread_id_for_room("room-x")
+    fake_sender.thread_id = live_thread_id_for_room("room-x")
+    fake_sender.call_id = thread_id_for_room("room-x")
 
     with patch.object(
         main_module, "build_partial_transcript_sender", return_value=fake_sender
