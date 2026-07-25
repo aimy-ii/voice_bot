@@ -81,15 +81,15 @@ class Settings(BaseSettings):
     # Таймаут HTTP до графа, секунды (стриминговое соединение на весь ход).
     agent_timeout: float = Field(default=30.0, alias="VOICE_BOT_AGENT_TIMEOUT")
 
-    # --- Предподготовка по промежуточному STT (вторая точка входа графа) ---
-    # Выключено по умолчанию: пока агент не готов, поведение как раньше.
-    # На стенде с живым чекером — VOICE_BOT_AGENT_PARTIAL_ENABLED=true.
+    # --- Живой режим: предподготовка по промежуточному STT (vector_checker) ---
+    # Выключено по умолчанию (безопасно). На стенде — окружением:
+    # VOICE_BOT_AGENT_PARTIAL_ENABLED=true (чекер + контекстер, пока клиент говорит).
     agent_partial_enabled: bool = Field(default=False, alias="VOICE_BOT_AGENT_PARTIAL_ENABLED")
-    # URL второй точки входа (может совпадать с AGENT_URL).
+    # URL LangGraph-сервера агента (вторая точка входа; может совпадать с AGENT_URL).
     agent_partial_url: str = Field(
         default="http://172.17.0.1:8127", alias="VOICE_BOT_AGENT_PARTIAL_URL"
     )
-    # Имя графа/ассистента предподготовки из langgraph.json агента.
+    # Имя служебного графа из langgraph.json агента.
     agent_partial_graph: str = Field(
         default="vector_checker", alias="VOICE_BOT_AGENT_PARTIAL_GRAPH"
     )
