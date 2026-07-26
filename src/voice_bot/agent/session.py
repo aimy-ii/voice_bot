@@ -110,7 +110,8 @@ class PartialTranscriptSender:
     Слушает ``user_input_transcribed`` сессии LiveKit: туда уже приходит
     и промежуточный, и финальный текст, без вмешательства в конвейер STT.
     Каждый раз уходит **весь** накопленный текст реплики в поле
-    ``partial_reply``, не дельта. HTTP ставится через
+    ``partial_reply``, не дельта. Вместе с текстом — ``partial_utterance_id``
+    (свой на реплику) и ``partial_is_final``. HTTP ставится через
     ``asyncio.create_task`` — обработчик хода не ждёт ответа; ошибки и
     таймауты только в лог. Служебные run идут на отдельном лайв-треде со
     ``multitask_strategy="interrupt"``; скрипт в кеше мозга ключуется
@@ -140,6 +141,8 @@ class PartialTranscriptSender:
         self._sending = True
         self._committed = ""
         self._last_sent = ""
+        # Стабилен внутри реплики; новый UUID только при сбросе в on_user_state.
+        self._utterance_id = str(uuid.uuid4())
         self._tasks: set[asyncio.Task[Any]] = set()
 
     @property
@@ -189,7 +192,11 @@ class PartialTranscriptSender:
         if not payload or payload == self._last_sent:
             return
         self._last_sent = payload
-        self._schedule_send(payload)
+        self._schedule_send(
+            payload,
+            utterance_id=self._utterance_id,
+            is_final=ev.is_final,
+        )
 
     def on_user_state(self, ev: UserStateChangedEvent) -> None:
         """Сбросить буфер и снова разрешить отправку на новой реплике.
@@ -201,12 +208,15 @@ class PartialTranscriptSender:
             self._sending = True
             self._committed = ""
             self._last_sent = ""
+            self._utterance_id = str(uuid.uuid4())
 
-    def _schedule_send(self, text: str) -> None:
+    def _schedule_send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
         """Поставить отправку в фон; исключения гасятся в done-callback.
 
         Args:
             text: накопленный текст реплики целиком.
+            utterance_id: идентификатор реплики на момент постановки.
+            is_final: ``True``, если кусок — финальный распознанный текст.
         """
         try:
             loop = asyncio.get_running_loop()
@@ -217,7 +227,10 @@ class PartialTranscriptSender:
             )
             return
 
-        task = loop.create_task(self._send(text), name="agent-partial-transcript")
+        task = loop.create_task(
+            self._send(text, utterance_id=utterance_id, is_final=is_final),
+            name="agent-partial-transcript",
+        )
         self._tasks.add(task)
         task.add_done_callback(self._on_send_done)
 
@@ -238,31 +251,42 @@ class PartialTranscriptSender:
                 exc,
             )
 
-    async def _send(self, text: str) -> None:
+    async def _send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
         """Поставить фоновый run на ``vector_checker``; ответ не читаем.
 
         Граф читает накопленный текст из ``partial_reply``. Новый служебный
         проход идёт со ``multitask_strategy="interrupt"``: незавершённый
         предыдущий на лайв-треде отменяется; канал генератора не затрагивается.
         ``call_id`` в ``configurable`` указывает на скрипт того же звонка.
+        ``partial_utterance_id`` стабилен внутри реплики; мозг сбрасывает
+        точку отсчёта прироста при смене идентификатора.
 
         Args:
             text: накопленный распознанный текст целиком.
+            utterance_id: идентификатор реплики на момент постановки отправки.
+            is_final: ``True``, если это финальный распознанный текст реплики.
         """
         preview = text[:40]
         logger.info(
-            "[live] отправка в %s: %d симв., «%s» (live_thread=%s, call_id=%s)",
+            "[live] отправка в %s: %d симв., «%s» "
+            "(live_thread=%s, call_id=%s, utterance_id=%s, is_final=%s)",
             self._graph,
             len(text),
             preview,
             self._thread_id,
             self._call_id,
+            utterance_id,
+            is_final,
         )
         try:
             await self._client.runs.create(
                 thread_id=self._thread_id,
                 assistant_id=self._graph,
-                input={"partial_reply": text},
+                input={
+                    "partial_reply": text,
+                    "partial_utterance_id": utterance_id,
+                    "partial_is_final": is_final,
+                },
                 config={"configurable": {"call_id": self._call_id}},
                 if_not_exists="create",
                 # Свежий кусок важнее очереди устаревших гипотез на лайв-треде.
