@@ -77,6 +77,11 @@ def _rtc_session_agent_name(*, auto_accept: bool, agent_name: str) -> str:
 async def entrypoint(ctx: agents.JobContext) -> None:
     """Обработать один звонок: собрать сессию и начать разговор по сценарию.
 
+    При ``llm_provider=agent`` первая фраза появляется не мгновенно: её
+    генерирует модель (примерно 1.5–2 с после подключения). Это осознанный
+    размен на единственную точку правды — вступление идёт из шага графа
+    «Приветствие», а не из ``opening_line`` сценария бота.
+
     Args:
         ctx: контекст задания LiveKit (комната, участники).
     """
@@ -96,10 +101,13 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     await session.start(room=ctx.room, agent=ScriptAgent(instructions))
     await _start_background_audio(room=ctx.room, session=session, settings=settings)
 
-    # Приветствие произносим дословно из сценария: первая фраза всегда
-    # одинаковая и предсказуемая. Не generate_reply — иначе граф вызовется
-    # на пустой истории и заговорит вместо opening_line.
-    await session.say(scenario.opening_line, allow_interruptions=False)
+    # При работе с мозгом вступление — обычный первый шаг скрипта, поэтому
+    # граф зовётся сразу на пустой истории. Дословная opening_line остаётся
+    # только для старого пути llm_provider=openai.
+    if settings.llm_provider == "agent":
+        await session.generate_reply()
+    else:
+        await session.say(scenario.opening_line, allow_interruptions=False)
 
 
 def _assistant_text(item: object) -> str:
