@@ -29,7 +29,6 @@ from langgraph.pregel.remote import RemoteGraph
 from langgraph_sdk.client import LangGraphClient
 from livekit.agents import (
     AgentSession,
-    AgentStateChangedEvent,
     TurnHandlingOptions,
     UserInputTranscribedEvent,
     UserStateChangedEvent,
@@ -79,19 +78,44 @@ def thread_id_for_room(room_name: str) -> str:
     return str(uuid.uuid5(_ROOM_THREAD_NAMESPACE, room_name))
 
 
+def live_thread_id_for_room(room_name: str) -> str:
+    """Собрать UUID лайв-треда ``vector_checker`` из имени комнаты LiveKit.
+
+    Лайв-канал и канал генератора не должны делить один тред LangGraph:
+    Server сериализует запуски на треде, и служебный run выталкивает
+    основной ход. Здесь — отдельный детерминированный ``uuid5`` по
+    ``"{room_name}#live"`` в том же ``_ROOM_THREAD_NAMESPACE``: одна
+    комната → один лайв-тред, отличный от основного ``thread_id_for_room``.
+
+    Args:
+        room_name: непустое имя комнаты LiveKit.
+
+    Returns:
+        Строка UUID для лайв-треда ``runs.create``.
+
+    Raises:
+        ValueError: если ``room_name`` пуст или из одних пробелов.
+    """
+    if not room_name or not room_name.strip():
+        raise ValueError(
+            "room_name обязателен для live_thread_id: пустое имя комнаты "
+            "нельзя отобразить в UUID треда LangGraph"
+        )
+    return str(uuid.uuid5(_ROOM_THREAD_NAMESPACE, f"{room_name}#live"))
+
+
 class PartialTranscriptSender:
     """Фоновая отправка накопленного STT на служебный граф ``vector_checker``.
 
     Слушает ``user_input_transcribed`` сессии LiveKit: туда уже приходит
     и промежуточный, и финальный текст, без вмешательства в конвейер STT.
     Каждый раз уходит **весь** накопленный текст реплики в поле
-    ``partial_reply``, не дельта. HTTP ставится через
+    ``partial_reply``, не дельта. Вместе с текстом — ``partial_utterance_id``
+    (свой на реплику) и ``partial_is_final``. HTTP ставится через
     ``asyncio.create_task`` — обработчик хода не ждёт ответа; ошибки и
-    таймауты только в лог. Служебные run идут со
-    ``multitask_strategy="interrupt"``.
-
-    После перехода агента в ``thinking`` (основной ход) отправка
-    прекращается до начала следующей реплики клиента.
+    таймауты только в лог. Служебные run идут на отдельном лайв-треде со
+    ``multitask_strategy="interrupt"``; скрипт в кеше мозга ключуется
+    через ``call_id`` (UUID основного хода), без общей очереди запусков.
     """
 
     def __init__(
@@ -100,26 +124,36 @@ class PartialTranscriptSender:
         client: LangGraphClient,
         graph: str,
         thread_id: str,
+        call_id: str,
     ) -> None:
         """Сохранить клиент и идентификаторы для фоновых ``runs.create``.
 
         Args:
             client: LangGraph SDK-клиент ко второй точке входа.
             graph: имя графа/ассистента предподготовки.
-            thread_id: тот же UUID-тред, что у основного хода.
+            thread_id: UUID лайв-треда (не тред основного хода).
+            call_id: UUID звонка / основного хода; ключ скрипта в кеше.
         """
         self._client = client
         self._graph = graph
         self._thread_id = thread_id
+        self._call_id = call_id
         self._sending = True
         self._committed = ""
         self._last_sent = ""
+        # Стабилен внутри реплики; новый UUID только при сбросе в on_user_state.
+        self._utterance_id = str(uuid.uuid4())
         self._tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def thread_id(self) -> str:
-        """``thread_id``, с которым уходят фоновые run."""
+        """Лайв-``thread_id``, с которым уходят фоновые run."""
         return self._thread_id
+
+    @property
+    def call_id(self) -> str:
+        """Идентификатор звонка (тред основного хода) для кеша скрипта."""
+        return self._call_id
 
     def attach(self, session: AgentSession) -> None:
         """Подписать обработчики на события сессии (не блокирует STT).
@@ -131,10 +165,6 @@ class PartialTranscriptSender:
         @session.on("user_input_transcribed")
         def _on_transcript(ev: UserInputTranscribedEvent) -> None:
             self.on_transcript(ev)
-
-        @session.on("agent_state_changed")
-        def _on_agent_state(ev: AgentStateChangedEvent) -> None:
-            self.on_agent_state(ev)
 
         @session.on("user_state_changed")
         def _on_user_state(ev: UserStateChangedEvent) -> None:
@@ -162,16 +192,11 @@ class PartialTranscriptSender:
         if not payload or payload == self._last_sent:
             return
         self._last_sent = payload
-        self._schedule_send(payload)
-
-    def on_agent_state(self, ev: AgentStateChangedEvent) -> None:
-        """Остановить отправку, когда начался основной ход (``thinking``).
-
-        Args:
-            ev: смена состояния агента.
-        """
-        if ev.new_state == "thinking":
-            self._sending = False
+        self._schedule_send(
+            payload,
+            utterance_id=self._utterance_id,
+            is_final=ev.is_final,
+        )
 
     def on_user_state(self, ev: UserStateChangedEvent) -> None:
         """Сбросить буфер и снова разрешить отправку на новой реплике.
@@ -183,12 +208,15 @@ class PartialTranscriptSender:
             self._sending = True
             self._committed = ""
             self._last_sent = ""
+            self._utterance_id = str(uuid.uuid4())
 
-    def _schedule_send(self, text: str) -> None:
+    def _schedule_send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
         """Поставить отправку в фон; исключения гасятся в done-callback.
 
         Args:
             text: накопленный текст реплики целиком.
+            utterance_id: идентификатор реплики на момент постановки.
+            is_final: ``True``, если кусок — финальный распознанный текст.
         """
         try:
             loop = asyncio.get_running_loop()
@@ -199,7 +227,10 @@ class PartialTranscriptSender:
             )
             return
 
-        task = loop.create_task(self._send(text), name="agent-partial-transcript")
+        task = loop.create_task(
+            self._send(text, utterance_id=utterance_id, is_final=is_final),
+            name="agent-partial-transcript",
+        )
         self._tasks.add(task)
         task.add_done_callback(self._on_send_done)
 
@@ -220,38 +251,51 @@ class PartialTranscriptSender:
                 exc,
             )
 
-    async def _send(self, text: str) -> None:
+    async def _send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
         """Поставить фоновый run на ``vector_checker``; ответ не читаем.
 
         Граф читает накопленный текст из ``partial_reply``. Новый служебный
         проход идёт со ``multitask_strategy="interrupt"``: незавершённый
-        предыдущий на том же треде отменяется.
+        предыдущий на лайв-треде отменяется; канал генератора не затрагивается.
+        ``call_id`` в ``configurable`` указывает на скрипт того же звонка.
+        ``partial_utterance_id`` стабилен внутри реплики; мозг сбрасывает
+        точку отсчёта прироста при смене идентификатора.
 
         Args:
             text: накопленный распознанный текст целиком.
+            utterance_id: идентификатор реплики на момент постановки отправки.
+            is_final: ``True``, если это финальный распознанный текст реплики.
         """
         preview = text[:40]
         logger.info(
-            "[live] отправка в %s: %d симв., «%s»",
+            "[live] отправка в %s: %d симв., «%s» "
+            "(live_thread=%s, call_id=%s, utterance_id=%s, is_final=%s)",
             self._graph,
             len(text),
             preview,
+            self._thread_id,
+            self._call_id,
+            utterance_id,
+            is_final,
         )
         try:
             await self._client.runs.create(
                 thread_id=self._thread_id,
                 assistant_id=self._graph,
-                input={"partial_reply": text},
+                input={
+                    "partial_reply": text,
+                    "partial_utterance_id": utterance_id,
+                    "partial_is_final": is_final,
+                },
+                config={"configurable": {"call_id": self._call_id}},
                 if_not_exists="create",
-                # Свежий кусок важнее очереди устаревших гипотез.
+                # Свежий кусок важнее очереди устаревших гипотез на лайв-треде.
                 multitask_strategy="interrupt",
             )
         except Exception as exc:
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
-            reason = getattr(response, "reason_phrase", None) or getattr(
-                response, "reason", None
-            )
+            reason = getattr(response, "reason_phrase", None) or getattr(response, "reason", None)
             if status is not None:
                 suffix = reason if reason else type(exc).__name__
                 detail = f"код={status}, {suffix}"
@@ -282,10 +326,13 @@ def build_partial_transcript_sender(
 
     HTTP-клиент с ``trust_env=False``: как у основного графа, SOCKS5 из
     окружения воркера не должен перехватывать локальный трафик к агенту.
+    Лайв-тред — ``live_thread_id_for_room``; ``call_id`` — UUID основного
+    хода той же комнаты, чтобы оба канала делили скрипт в кеше.
 
     Args:
         settings: настройки с URL/именем второй точки входа и таймаутом.
-        room_name: имя комнаты LiveKit; из него же берётся ``thread_id``.
+        room_name: имя комнаты LiveKit; из него собираются лайв-тред и
+            ``call_id``.
 
     Returns:
         Готовый ``PartialTranscriptSender`` (ещё не подписан на сессию).
@@ -293,7 +340,8 @@ def build_partial_transcript_sender(
     Raises:
         ValueError: если ``room_name`` пуст (как у ``thread_id_for_room``).
     """
-    thread_id = thread_id_for_room(room_name)
+    call_id = thread_id_for_room(room_name)
+    live_thread_id = live_thread_id_for_room(room_name)
     http_client = httpx.AsyncClient(
         base_url=settings.agent_partial_url,
         timeout=httpx.Timeout(
@@ -308,7 +356,8 @@ def build_partial_transcript_sender(
     return PartialTranscriptSender(
         client=client,
         graph=settings.agent_partial_graph,
-        thread_id=thread_id,
+        thread_id=live_thread_id,
+        call_id=call_id,
     )
 
 
