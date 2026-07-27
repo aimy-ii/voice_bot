@@ -30,6 +30,10 @@ coverage.xml
 
 # ─── Логи и временные файлы ─────────────────────────────────
 *.log
+*.log.*
+logs/
+лог_*.txt
+лог_с_диалогом*.txt
 *.tmp
 *.temp
 tmp/
@@ -38,10 +42,18 @@ temp/
 # ─── OS ─────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+Desktop.ini
 
-# ─── IDE / редакторы / AI-инструменты ───────────────────────
+# ─── JetBrains / IntelliJ / PyCharm ─────────────────────────
 .idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# ─── VS Code / Cursor / AI-инструменты ──────────────────────
 .vscode/
+*.code-workspace
 .cursor/
 .cursorignore
 .cursorrules
@@ -50,6 +62,8 @@ Thumbs.db
 .claude/
 .continue/
 .windsurf/
+.fleet/
+.ionide/
 *.swp
 *.swo
 *~
