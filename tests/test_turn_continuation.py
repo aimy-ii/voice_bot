@@ -1,5 +1,7 @@
 """Офлайн-тесты продолжения речи бота и реакции на тишину клиента."""
 
+import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -89,9 +91,33 @@ async def test_expects_continuation_false_without_flag() -> None:
 async def test_expects_continuation_false_on_client_error() -> None:
     """Ошибка клиента → False, без исключения наружу."""
     client = MagicMock()
-    client.threads.get_state = AsyncMock(side_effect=TimeoutError("boom"))
+    client.threads.get_state = AsyncMock(side_effect=RuntimeError("boom"))
 
     assert await session_module.expects_continuation(client, "tid") is False
+
+
+@pytest.mark.asyncio
+async def test_expects_continuation_false_on_read_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Таймаут чтения state → False и отличимая строка в логе."""
+
+    async def _slow_get_state(_thread_id: str) -> dict[str, object]:
+        await asyncio.sleep(10)
+        return {"values": {"expect_continuation": True}}
+
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(side_effect=_slow_get_state)
+
+    with (
+        patch.object(session_module, "CONTINUATION_READ_TIMEOUT", 0.05),
+        caplog.at_level(logging.INFO, logger="voice_bot.partial"),
+    ):
+        assert await session_module.expects_continuation(client, "tid") is False
+
+    assert any("таймаут чтения" in r.message for r in caplog.records)
+    assert not any("flag=False" in r.message for r in caplog.records)
+    assert not any("ошибка чтения" in r.message for r in caplog.records)
 
 
 # --- продолжение после реплики бота --------------------------------------
@@ -99,7 +125,7 @@ async def test_expects_continuation_false_on_client_error() -> None:
 
 @pytest.mark.asyncio
 async def test_finished_with_flag_starts_continuation() -> None:
-    """Флаг стоит → generate_reply, таймер не взведён, turn_kind=continuation."""
+    """Флаг стоит → таймер снят, generate_reply, turn_kind=continuation."""
     lg = MagicMock()
     lg.threads.get_state = AsyncMock(return_value={"values": {"expect_continuation": True}})
     controller = _controller(lg_client=lg)
@@ -115,8 +141,8 @@ async def test_finished_with_flag_starts_continuation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finished_without_flag_arms_silence_timer() -> None:
-    """Флага нет → generate_reply не вызван, таймер взведён."""
+async def test_finished_without_flag_keeps_silence_timer() -> None:
+    """Флага нет → generate_reply не вызван, таймер остаётся взведённым."""
     controller = _controller(lg_client=MagicMock())
     session = controller._session
 
@@ -127,6 +153,37 @@ async def test_finished_without_flag_arms_silence_timer() -> None:
     assert controller.silence_task is not None
     assert not controller.silence_task.done()
     controller.cancel_silence_timer()
+
+
+@pytest.mark.asyncio
+async def test_finished_hanging_flag_read_still_arms_and_fires_silence() -> None:
+    """Чтение флага виснет — таймер уже взведён и срабатывает."""
+    hang = asyncio.Event()
+
+    async def _hang_read(*_a: object, **_k: object) -> bool:
+        await hang.wait()
+        return False
+
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0.05,
+        VOICE_BOT_SILENCE_PROMPTS=["алло?"],
+    )
+    controller = _controller(settings=settings, lg_client=MagicMock())
+    session = controller._session
+
+    with patch.object(main_module, "expects_continuation", side_effect=_hang_read):
+        finished = asyncio.create_task(controller.on_agent_finished_speaking())
+        await asyncio.sleep(0)
+        assert controller.silence_task is not None
+
+        silence = controller.silence_task
+        await silence
+        assert session.say.call_count == 1
+        assert session.say.call_args.args[0] == "алло?"
+        session.generate_reply.assert_not_called()
+
+        hang.set()
+        await finished
 
 
 @pytest.mark.asyncio

@@ -230,7 +230,10 @@ class CallTurnController:
         task.add_done_callback(self._finished_tasks.discard)
 
     async def on_agent_finished_speaking(self) -> None:
-        """После реплики бота: продолжить ход или взвести таймер тишины.
+        """После реплики бота: взвести таймер тишины, затем проверить продолжение.
+
+        Таймер взводится первым: если чтение флага зависнет или упадёт,
+        предохранитель тишины всё равно отработает.
 
         Returns:
             None.
@@ -244,12 +247,15 @@ class CallTurnController:
             set_turn_kind(self._session.llm, "client")
             return
 
+        # Таймер — предохранитель: не ждёт ответа мозга о продолжении.
+        self.arm_silence_timer()
+        logger.info("[turn] таймер тишины взведён до чтения флага продолжения")
+
         if await self._maybe_continue():
             return
 
         self.continuation_count = 0
         set_turn_kind(self._session.llm, "client")
-        self.arm_silence_timer()
 
     async def _maybe_continue(self) -> bool:
         """Запустить ход-продолжение, если мозг обещал и лимит не исчерпан.

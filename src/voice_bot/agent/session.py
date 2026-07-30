@@ -129,6 +129,11 @@ def build_agent_langgraph_client(*, settings: Settings) -> LangGraphClient:
     return LangGraphClient(http_client)
 
 
+#: Сколько ждём ответа мозга о продолжении. Дольше ждать бессмысленно:
+#: пауза в разговоре дороже пропущенного продолжения.
+CONTINUATION_READ_TIMEOUT = 1.5
+
+
 async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
     """Обещал ли мозг продолжить реплику на следующем ходу.
 
@@ -138,10 +143,20 @@ async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
 
     Returns:
         True — надо запустить следующий ход без реплики клиента.
-        Любая ошибка чтения — False: молчание безопаснее лишнего хода.
+        Любая ошибка или таймаут чтения — False: молчание безопаснее лишнего хода.
     """
     try:
-        state = await client.threads.get_state(thread_id)
+        state = await asyncio.wait_for(
+            client.threads.get_state(thread_id),
+            timeout=CONTINUATION_READ_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.info(
+            "[turn] expects_continuation: таймаут чтения (thread_id=%s, timeout=%sс)",
+            thread_id,
+            CONTINUATION_READ_TIMEOUT,
+        )
+        return False
     except Exception as exc:
         logger.info(
             "[turn] expects_continuation: ошибка чтения (thread_id=%s): %s",
