@@ -83,9 +83,10 @@ def _rtc_session_agent_name(*, auto_accept: bool, agent_name: str) -> str:
 
 
 class CallTurnController:
-    """Продолжение собственной речи бота и реакция на тишину клиента.
+    """Продолжение собственной речи бота и оклики при ``user_state=away``.
 
-    Оба механизма делят один таймер тишины и вешаются на события сессии.
+    Тишину детектит LiveKit (``user_away_timeout``); здесь только реакция
+    на события и чтение флага продолжения у мозга.
     """
 
     def __init__(
@@ -114,26 +115,24 @@ class CallTurnController:
 
         self.continuation_count: int = 0
         self.silence_attempts: int = 0
-        self.silence_task: asyncio.Task[None] | None = None
-        self._abort_continuation: bool = False
-        self._silence_prompt_active: bool = False
+        self.away_task: asyncio.Task[None] | None = None
         self._finished_tasks: set[asyncio.Task[None]] = set()
 
     def attach(self) -> None:
-        """Подписать обработчики на конец/начало речи бота и клиента."""
+        """Подписать обработчики на конец речи бота и смену состояния клиента."""
 
         @self._session.on("agent_state_changed")
         def _on_agent(ev: AgentStateChangedEvent) -> None:
-            if ev.new_state == "speaking":
-                self.on_agent_started_speaking()
-            elif ev.old_state == "speaking":
+            if ev.old_state == "speaking":
                 logger.info("[turn] бот договорил: agent_state_changed speaking→%s", ev.new_state)
                 self._schedule_finished()
 
         @self._session.on("user_state_changed")
         def _on_user(ev: UserStateChangedEvent) -> None:
-            if ev.new_state == "speaking":
-                self.on_user_started_speaking()
+            if ev.new_state == "away":
+                self.on_user_away()
+            else:
+                self.on_user_present()
 
         logger.info(
             "[turn] обработчики подключены: silence_timeout=%s max_continuations=%s",
@@ -141,49 +140,37 @@ class CallTurnController:
             self._settings.max_continuations,
         )
 
-    def on_agent_started_speaking(self) -> None:
-        """Снять таймер тишины; для фраз-дозвонов таймер не трогаем.
-
-        Дозвон идёт из того же таймера: отмена здесь оборвала бы цикл попыток.
+    def on_user_away(self) -> None:
+        """Клиент пропал (``away``): запустить оклики, если задача ещё не идёт.
 
         Returns:
             None.
         """
-        if self._silence_prompt_active:
+        if self.away_task is not None and not self.away_task.done():
+            logger.info("[turn] пользователь ушёл в away: оклики уже идут, повтор пропущен")
             return
-        self.cancel_silence_timer()
-        self.silence_attempts = 0
-        logger.info(
-            "[turn] бот заговорил: таймер снят, silence_prompt_active=%s",
-            self._silence_prompt_active,
-        )
 
-    def on_user_started_speaking(self) -> None:
-        """Клиент заговорил: снять таймер, обнулить попытки, отменить продолжение.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("Нет event loop для окликов на тишину")
+            return
 
-        Returns:
-            None.
-        """
-        self.cancel_silence_timer()
-        self.silence_attempts = 0
-        self._abort_continuation = True
-        set_turn_kind(self._session.llm, "client")
-        logger.info("[turn] клиент заговорил: таймер снят, продолжение отменено")
+        logger.info("[turn] пользователь ушёл в away")
+        self.away_task = loop.create_task(self._away_prompts(), name="away-prompts")
 
-    def cancel_silence_timer(self) -> None:
-        """Отменить текущую задачу таймера тишины, если она есть.
-
-        Текущую задачу (если отмена вызвана изнутри неё) не трогаем:
-        иначе снаружи ``await silence_task`` получит ``CancelledError``.
+    def on_user_present(self) -> None:
+        """Клиент снова на связи: отменить оклики и обнулить счётчик попыток.
 
         Returns:
             None.
         """
-        task = self.silence_task
-        self.silence_task = None
+        task = self.away_task
+        self.away_task = None
+        self.silence_attempts = 0
         if task is None or task.done():
             return
-        logger.info("[turn] таймер тишины отменён")
+        logger.info("[turn] пользователь вернулся: оклики отменены")
         try:
             current = asyncio.current_task()
         except RuntimeError:
@@ -191,35 +178,12 @@ class CallTurnController:
         if task is not current:
             task.cancel()
 
-    def arm_silence_timer(self) -> None:
-        """Взвесить таймер тишины на ``silence_timeout`` секунд.
-
-        Returns:
-            None.
-        """
-        self.cancel_silence_timer()
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.warning("Нет event loop для таймера тишины")
-            return
-        self.silence_task = loop.create_task(self._silence_timeout(), name="silence-timeout")
-        logger.info(
-            "[turn] таймер тишины взведён на %s с",
-            self._settings.silence_timeout,
-        )
-
     def _schedule_finished(self) -> None:
         """Поставить обработку «бот договорил» в фон.
 
-        Во время фразы-дозвона не планируем: её цикл сам взводит таймер
-        или завершает звонок, иначе будет гонка с ``finally``.
-
         Returns:
             None.
         """
-        if self._silence_prompt_active:
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -230,126 +194,84 @@ class CallTurnController:
         task.add_done_callback(self._finished_tasks.discard)
 
     async def on_agent_finished_speaking(self) -> None:
-        """После реплики бота: взвести таймер тишины, затем проверить продолжение.
+        """После реплики бота: прочитать флаг продолжения и при необходимости запустить ход.
 
-        Таймер взводится первым: если чтение флага зависнет или упадёт,
-        предохранитель тишины всё равно отработает.
+        Ранних выходов до чтения флага нет. Ошибка или таймаут чтения —
+        считаем, что флага нет. Лимит ``max_continuations`` проверяется
+        вместе с флагом.
 
         Returns:
             None.
         """
-        if self._silence_prompt_active:
+        flag = False
+        try:
+            if self._lg_client is not None and self._thread_id:
+                flag = await expects_continuation(
+                    self._lg_client,  # type: ignore[arg-type]
+                    self._thread_id,
+                )
+        except Exception as exc:
+            logger.info("[turn] продолжение: ошибка чтения флага: %s", exc)
+            flag = False
+
+        logger.info("[turn] продолжение: флаг прочитан, expect_continuation=%s", flag)
+
+        if flag and self.continuation_count < self._settings.max_continuations:
+            self.continuation_count += 1
+            set_turn_kind(self._session.llm, "continuation")
+            logger.info("[turn] продолжение: запущено #%s", self.continuation_count)
+            await self._session.generate_reply()
             return
 
-        if self._abort_continuation:
-            self._abort_continuation = False
-            self.continuation_count = 0
-            set_turn_kind(self._session.llm, "client")
-            return
-
-        # Таймер — предохранитель: не ждёт ответа мозга о продолжении.
-        self.arm_silence_timer()
-        logger.info("[turn] таймер тишины взведён до чтения флага продолжения")
-
-        if await self._maybe_continue():
-            return
-
+        if flag:
+            logger.info(
+                "[turn] продолжение: лимит исчерпан (count=%s max=%s)",
+                self.continuation_count,
+                self._settings.max_continuations,
+            )
         self.continuation_count = 0
         set_turn_kind(self._session.llm, "client")
 
-    async def _maybe_continue(self) -> bool:
-        """Запустить ход-продолжение, если мозг обещал и лимит не исчерпан.
+    async def _away_prompts(self) -> None:
+        """Произнести фразы-оклики по порядку; после последней завершить звонок.
 
-        Returns:
-            True — продолжение запущено; False — ход отдаётся клиенту.
-        """
-        if self._lg_client is None or not self._thread_id:
-            logger.info("[turn] продолжение: нет клиента или треда")
-            return False
-        if self.continuation_count >= self._settings.max_continuations:
-            logger.info(
-                "[turn] продолжение: лимит исчерпан (count=%s max=%s)",
-                self.continuation_count,
-                self._settings.max_continuations,
-            )
-            return False
-
-        flag = await expects_continuation(self._lg_client, self._thread_id)  # type: ignore[arg-type]
-        logger.info("[turn] продолжение: флаг прочитан, expect_continuation=%s", flag)
-        if self._abort_continuation:
-            self._abort_continuation = False
-            self.continuation_count = 0
-            set_turn_kind(self._session.llm, "client")
-            return True  # не взводить тишину: клиент уже перехватил ход
-
-        if not flag:
-            return False
-        if self.continuation_count >= self._settings.max_continuations:
-            logger.info(
-                "[turn] продолжение: лимит исчерпан (count=%s max=%s)",
-                self.continuation_count,
-                self._settings.max_continuations,
-            )
-            return False
-
-        self.continuation_count += 1
-        self.cancel_silence_timer()
-        set_turn_kind(self._session.llm, "continuation")
-        logger.info("[turn] продолжение: запущено #%s", self.continuation_count)
-        await self._session.generate_reply()
-        return True
-
-    async def _silence_timeout(self) -> None:
-        """По таймауту тишины произнести фразы-дозвоны и при необходимости завершить звонок.
-
-        Один цикл на все попытки: между фразами снова ждём ``silence_timeout``,
-        без пересоздания задачи (иначе гонки с ``cancel``).
+        Между фразами ждём ``silence_timeout``. Отмена снаружи (клиент
+        заговорил) прерывает цикл через ``CancelledError``.
 
         Returns:
             None.
         """
-        prompts = self._settings.silence_prompts
-        if not prompts:
-            return
-
-        while True:
-            try:
-                await asyncio.sleep(self._settings.silence_timeout)
-            except asyncio.CancelledError:
+        try:
+            prompts = self._settings.silence_prompts
+            if not prompts:
                 return
 
-            index = min(self.silence_attempts, len(prompts) - 1)
-            phrase = prompts[index]
-            is_last = index >= len(prompts) - 1
-            self.silence_attempts = index + 1
+            while True:
+                index = min(self.silence_attempts, len(prompts) - 1)
+                phrase = prompts[index]
+                is_last = index >= len(prompts) - 1
+                self.silence_attempts = index + 1
 
-            logger.info(
-                "[turn] тишина: попытка #%s, фраза=%r",
-                self.silence_attempts,
-                phrase,
-            )
-            self._silence_prompt_active = True
-            try:
+                logger.info(
+                    "[turn] тишина: попытка #%s, фраза=%r",
+                    self.silence_attempts,
+                    phrase,
+                )
                 handle = self._session.say(phrase)
                 wait = getattr(handle, "wait_for_playout", None)
                 if callable(wait):
                     result = wait()
                     if inspect.isawaitable(result):
                         await result
-            except asyncio.CancelledError:
-                self._silence_prompt_active = False
-                raise
-            finally:
-                self._silence_prompt_active = False
 
-            if self._abort_continuation:
-                self._abort_continuation = False
-                return
+                if is_last:
+                    logger.info("[turn] тишина: звонок завершается (исчерпаны фразы-дозвоны)")
+                    self._ctx.delete_room()
+                    return
 
-            if is_last:
-                logger.info("[turn] тишина: звонок завершается (исчерпаны фразы-дозвоны)")
-                self._ctx.delete_room()
-                return
+                await asyncio.sleep(self._settings.silence_timeout)
+        except asyncio.CancelledError:
+            return
 
 
 @server.rtc_session(
@@ -386,7 +308,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     # При работе с мозгом вступление — обычный первый шаг скрипта, поэтому
     # граф зовётся сразу на пустой истории. Дословная opening_line остаётся
     # только для старого пути llm_provider=openai.
-    # Таймер тишины взводится только после того, как бот договорил вступление.
+    # Тишину после реплик детектит LiveKit (user_away_timeout).
     if settings.llm_provider == "agent":
         set_turn_kind(session.llm, "client")
         await session.generate_reply()

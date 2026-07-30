@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     bg_thinking_volume: float = Field(default=0.6, alias="BG_THINKING_VOLUME")
 
     # --- Тишина клиента и продолжение собственной речи бота ---
-    #: Через сколько тишины клиента бот подаёт голос сам.
+    #: Через сколько тишины считать, что клиент пропал. Ноль и None — выключено.
     silence_timeout: float = Field(default=6.0, alias="VOICE_BOT_SILENCE_TIMEOUT")
     #: Фразы на тишину по порядку: последняя произносится перед завершением звонка.
     silence_prompts: list[str] = Field(

@@ -698,4 +698,6 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         vad=vad,
         # Определяет, что реплика клиента завершена (мультиязычная модель).
         turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
+        # Штатный детект тишины LiveKit: оба молчат → user_state=away.
+        user_away_timeout=settings.silence_timeout or None,
     )

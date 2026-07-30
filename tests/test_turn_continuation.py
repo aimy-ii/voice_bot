@@ -1,4 +1,4 @@
-"""Офлайн-тесты продолжения речи бота и реакции на тишину клиента."""
+"""Офлайн-тесты продолжения речи бота и окликов при user_state=away."""
 
 import asyncio
 import logging
@@ -125,9 +125,8 @@ async def test_expects_continuation_false_on_read_timeout(
 
 @pytest.mark.asyncio
 async def test_finished_with_flag_starts_continuation() -> None:
-    """Флаг стоит → таймер снят, generate_reply, turn_kind=continuation."""
+    """Флаг стоит → generate_reply, turn_kind=continuation."""
     lg = MagicMock()
-    lg.threads.get_state = AsyncMock(return_value={"values": {"expect_continuation": True}})
     controller = _controller(lg_client=lg)
     session = controller._session
 
@@ -135,14 +134,13 @@ async def test_finished_with_flag_starts_continuation() -> None:
         await controller.on_agent_finished_speaking()
 
     session.generate_reply.assert_awaited_once_with()
-    assert controller.silence_task is None
     assert session.llm._config["configurable"]["turn_kind"] == "continuation"
     assert controller.continuation_count == 1
 
 
 @pytest.mark.asyncio
-async def test_finished_without_flag_keeps_silence_timer() -> None:
-    """Флага нет → generate_reply не вызван, таймер остаётся взведённым."""
+async def test_finished_without_flag_skips_continuation() -> None:
+    """Флага нет → generate_reply не вызван, turn_kind=client."""
     controller = _controller(lg_client=MagicMock())
     session = controller._session
 
@@ -150,40 +148,39 @@ async def test_finished_without_flag_keeps_silence_timer() -> None:
         await controller.on_agent_finished_speaking()
 
     session.generate_reply.assert_not_called()
-    assert controller.silence_task is not None
-    assert not controller.silence_task.done()
-    controller.cancel_silence_timer()
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
+    assert controller.continuation_count == 0
 
 
 @pytest.mark.asyncio
-async def test_finished_hanging_flag_read_still_arms_and_fires_silence() -> None:
-    """Чтение флага виснет — таймер уже взведён и срабатывает."""
-    hang = asyncio.Event()
-
-    async def _hang_read(*_a: object, **_k: object) -> bool:
-        await hang.wait()
-        return False
-
-    settings = _settings(
-        VOICE_BOT_SILENCE_TIMEOUT=0.05,
-        VOICE_BOT_SILENCE_PROMPTS=["алло?"],
-    )
-    controller = _controller(settings=settings, lg_client=MagicMock())
+async def test_finished_flag_error_does_not_propagate() -> None:
+    """Чтение флага упало → generate_reply не вызван, исключение не летит."""
+    controller = _controller(lg_client=MagicMock())
     session = controller._session
 
-    with patch.object(main_module, "expects_continuation", side_effect=_hang_read):
-        finished = asyncio.create_task(controller.on_agent_finished_speaking())
-        await asyncio.sleep(0)
-        assert controller.silence_task is not None
+    with patch.object(
+        main_module,
+        "expects_continuation",
+        AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        await controller.on_agent_finished_speaking()
 
-        silence = controller.silence_task
-        await silence
-        assert session.say.call_count == 1
-        assert session.say.call_args.args[0] == "алло?"
-        session.generate_reply.assert_not_called()
+    session.generate_reply.assert_not_called()
+    assert controller.continuation_count == 0
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
 
-        hang.set()
-        await finished
+
+@pytest.mark.asyncio
+async def test_finished_flag_timeout_skips_continuation() -> None:
+    """Таймаут чтения флага → generate_reply не вызван."""
+    controller = _controller(lg_client=MagicMock())
+    session = controller._session
+
+    with patch.object(main_module, "expects_continuation", AsyncMock(return_value=False)):
+        await controller.on_agent_finished_speaking()
+
+    session.generate_reply.assert_not_called()
+    assert controller.continuation_count == 0
 
 
 @pytest.mark.asyncio
@@ -197,19 +194,18 @@ async def test_max_continuations_stops_monologue() -> None:
     with patch.object(main_module, "expects_continuation", AsyncMock(return_value=True)) as expect:
         await controller.on_agent_finished_speaking()
 
-    expect.assert_not_awaited()
+    expect.assert_awaited_once()
     session.generate_reply.assert_not_called()
     assert controller.continuation_count == 0
-    assert controller.silence_task is not None
-    controller.cancel_silence_timer()
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
 
 
-# --- тишина ---------------------------------------------------------------
+# --- away / оклики --------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_silence_three_prompts_then_delete_room() -> None:
-    """Три фразы на тишину; после третьей — delete_room, без generate_reply."""
+async def test_away_three_prompts_then_delete_room() -> None:
+    """Away → три фразы; после последней — delete_room, без generate_reply."""
     settings = _settings(
         VOICE_BOT_SILENCE_TIMEOUT=0,
         VOICE_BOT_SILENCE_PROMPTS=["раз", "два", "три"],
@@ -218,8 +214,8 @@ async def test_silence_three_prompts_then_delete_room() -> None:
     session = controller._session
     ctx = controller._ctx
 
-    await controller.on_agent_finished_speaking()
-    task = controller.silence_task
+    controller.on_user_away()
+    task = controller.away_task
     assert task is not None
     await task
 
@@ -230,25 +226,53 @@ async def test_silence_three_prompts_then_delete_room() -> None:
 
 
 @pytest.mark.asyncio
-async def test_user_speaking_cancels_timer_and_continuation() -> None:
-    """Клиент заговорил — таймер снят, попытки обнулены, продолжение отменено."""
-    controller = _controller(lg_client=MagicMock())
+async def test_user_present_cancels_away_prompts() -> None:
+    """Клиент заговорил во время окликов — задача снята, следующая фраза не звучит."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0.5,
+        VOICE_BOT_SILENCE_PROMPTS=["раз", "два", "три"],
+    )
+    controller = _controller(settings=settings, lg_client=None, thread_id=None)
     session = controller._session
-    controller.arm_silence_timer()
-    controller.silence_attempts = 2
-    controller.continuation_count = 1
-    assert controller.silence_task is not None
 
-    controller.on_user_started_speaking()
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
 
-    assert controller.silence_task is None
+    # Дать первой фразе прозвучать и уйти в sleep между окликами.
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if session.say.call_count >= 1:
+            break
+    assert session.say.call_count == 1
+
+    controller.on_user_present()
     assert controller.silence_attempts == 0
-    assert controller._abort_continuation is True
-    assert session.llm._config["configurable"]["turn_kind"] == "client"
+    assert controller.away_task is None
 
-    with patch.object(main_module, "expects_continuation", AsyncMock(return_value=True)):
-        await controller.on_agent_finished_speaking()
+    await asyncio.gather(task, return_exceptions=True)
 
-    session.generate_reply.assert_not_called()
-    assert controller.continuation_count == 0
-    assert controller.silence_task is None
+    await asyncio.sleep(0.6)
+    assert session.say.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_away_does_not_start_second_task() -> None:
+    """Повторный away при уже идущей задаче не запускает вторую."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=1.0,
+        VOICE_BOT_SILENCE_PROMPTS=["раз", "два"],
+    )
+    controller = _controller(settings=settings, lg_client=None, thread_id=None)
+
+    controller.on_user_away()
+    first = controller.away_task
+    assert first is not None
+    assert not first.done()
+
+    controller.on_user_away()
+    assert controller.away_task is first
+
+    controller.on_user_present()
+    await asyncio.gather(first, return_exceptions=True)
+    assert first.done()
