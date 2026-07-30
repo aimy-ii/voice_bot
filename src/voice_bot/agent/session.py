@@ -104,6 +104,85 @@ def live_thread_id_for_room(room_name: str) -> str:
     return str(uuid.uuid5(_ROOM_THREAD_NAMESPACE, f"{room_name}#live"))
 
 
+def build_agent_langgraph_client(*, settings: Settings) -> LangGraphClient:
+    """Собрать LangGraph-клиент к основному графу с ``trust_env=False``.
+
+    Тот же способ, что у ``_build_agent_llm``: SOCKS5 из окружения воркера
+    не должен перехватывать локальный трафик к мозгу на том же хосте.
+
+    Args:
+        settings: настройки с URL и таймаутом основного графа.
+
+    Returns:
+        Готовый ``LangGraphClient`` (например, для чтения state треда).
+    """
+    http_client = httpx.AsyncClient(
+        base_url=settings.agent_url,
+        timeout=httpx.Timeout(
+            connect=5.0,
+            read=settings.agent_timeout,
+            write=settings.agent_timeout,
+            pool=5.0,
+        ),
+        trust_env=False,
+    )
+    return LangGraphClient(http_client)
+
+
+async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
+    """Обещал ли мозг продолжить реплику на следующем ходу.
+
+    Args:
+        client: клиент LangGraph, тот же, что и для основного графа.
+        thread_id: идентификатор треда звонка.
+
+    Returns:
+        True — надо запустить следующий ход без реплики клиента.
+        Любая ошибка чтения — False: молчание безопаснее лишнего хода.
+    """
+    try:
+        state = await client.threads.get_state(thread_id)
+    except Exception as exc:
+        logger.warning(
+            "Не удалось прочитать expect_continuation (thread_id=%s): %s",
+            thread_id,
+            exc,
+        )
+        return False
+
+    values = state.get("values") if isinstance(state, dict) else getattr(state, "values", None)
+    if not isinstance(values, dict):
+        logger.info(
+            "expect_continuation отсутствует в state (thread_id=%s): values=%s",
+            thread_id,
+            type(values).__name__,
+        )
+        return False
+
+    flag = values.get("expect_continuation")
+    if flag is None:
+        logger.info("expect_continuation нет в state (thread_id=%s)", thread_id)
+        return False
+    return bool(flag)
+
+
+def set_turn_kind(llm: object, turn_kind: str) -> None:
+    """Записать ``turn_kind`` в ``configurable`` адаптера LLM (рядом с thread_id).
+
+    Args:
+        llm: плагин сессии (ожидается ``LLMAdapter`` с ``_config``).
+        turn_kind: ``client`` для обычного хода или ``continuation`` для
+            продолжения без реплики клиента.
+    """
+    config = getattr(llm, "_config", None)
+    if not isinstance(config, dict):
+        return
+    configurable = config.setdefault("configurable", {})
+    if not isinstance(configurable, dict):
+        return
+    configurable["turn_kind"] = turn_kind
+
+
 class PartialTranscriptSender:
     """Фоновая отправка накопленного STT на служебный граф ``vector_checker``.
 
@@ -482,7 +561,12 @@ def _build_agent_llm(*, settings: Settings, room_name: str) -> llm_module.LLM:
     )
     return langchain.LLMAdapter(
         graph=graph,
-        config={"configurable": {"thread_id": thread_id_for_room(room_name)}},
+        config={
+            "configurable": {
+                "thread_id": thread_id_for_room(room_name),
+                "turn_kind": "client",
+            }
+        },
         stream_mode="custom",
         subgraphs=False,
     )

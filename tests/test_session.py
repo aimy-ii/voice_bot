@@ -181,6 +181,7 @@ def test_build_session_uses_agent_llm_adapter(monkeypatch: pytest.MonkeyPatch) -
     assert thread_id == session_module.thread_id_for_room("room-alpha")
     assert thread_id != "room-alpha"
     assert UUID(thread_id)  # валидный UUID для LangGraph Server
+    assert llm._config["configurable"]["turn_kind"] == "client"
     assert llm._graph is remote_graph
 
     remote_ctor.assert_called_once()

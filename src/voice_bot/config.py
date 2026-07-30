@@ -113,6 +113,21 @@ class Settings(BaseSettings):
     bg_ambient_volume: float = Field(default=0.4, alias="BG_AMBIENT_VOLUME")
     bg_thinking_volume: float = Field(default=0.6, alias="BG_THINKING_VOLUME")
 
+    # --- Тишина клиента и продолжение собственной речи бота ---
+    #: Через сколько тишины клиента бот подаёт голос сам.
+    silence_timeout: float = Field(default=6.0, alias="VOICE_BOT_SILENCE_TIMEOUT")
+    #: Фразы на тишину по порядку: последняя произносится перед завершением звонка.
+    silence_prompts: list[str] = Field(
+        default_factory=lambda: [
+            "Алло, вы меня слышите?",
+            "Алло, вы на связи?",
+            "Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить.",
+        ],
+        alias="VOICE_BOT_SILENCE_PROMPTS",
+    )
+    #: Сколько продолжений подряд разрешено, страховка от монолога.
+    max_continuations: int = Field(default=3, alias="VOICE_BOT_MAX_CONTINUATIONS")
+
     @model_validator(mode="after")
     def _validate_required_settings(self) -> Self:
         """Проверить обязательные поля: пустые строки ловим на старте.
