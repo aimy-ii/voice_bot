@@ -127,12 +127,19 @@ class CallTurnController:
             if ev.new_state == "speaking":
                 self.on_agent_started_speaking()
             elif ev.old_state == "speaking":
+                logger.info("[turn] бот договорил: agent_state_changed speaking→%s", ev.new_state)
                 self._schedule_finished()
 
         @self._session.on("user_state_changed")
         def _on_user(ev: UserStateChangedEvent) -> None:
             if ev.new_state == "speaking":
                 self.on_user_started_speaking()
+
+        logger.info(
+            "[turn] обработчики подключены: silence_timeout=%s max_continuations=%s",
+            self._settings.silence_timeout,
+            self._settings.max_continuations,
+        )
 
     def on_agent_started_speaking(self) -> None:
         """Снять таймер тишины; для фраз-дозвонов таймер не трогаем.
@@ -146,6 +153,10 @@ class CallTurnController:
             return
         self.cancel_silence_timer()
         self.silence_attempts = 0
+        logger.info(
+            "[turn] бот заговорил: таймер снят, silence_prompt_active=%s",
+            self._silence_prompt_active,
+        )
 
     def on_user_started_speaking(self) -> None:
         """Клиент заговорил: снять таймер, обнулить попытки, отменить продолжение.
@@ -157,6 +168,7 @@ class CallTurnController:
         self.silence_attempts = 0
         self._abort_continuation = True
         set_turn_kind(self._session.llm, "client")
+        logger.info("[turn] клиент заговорил: таймер снят, продолжение отменено")
 
     def cancel_silence_timer(self) -> None:
         """Отменить текущую задачу таймера тишины, если она есть.
@@ -171,6 +183,7 @@ class CallTurnController:
         self.silence_task = None
         if task is None or task.done():
             return
+        logger.info("[turn] таймер тишины отменён")
         try:
             current = asyncio.current_task()
         except RuntimeError:
@@ -191,6 +204,10 @@ class CallTurnController:
             logger.warning("Нет event loop для таймера тишины")
             return
         self.silence_task = loop.create_task(self._silence_timeout(), name="silence-timeout")
+        logger.info(
+            "[turn] таймер тишины взведён на %s с",
+            self._settings.silence_timeout,
+        )
 
     def _schedule_finished(self) -> None:
         """Поставить обработку «бот договорил» в фон.
@@ -241,11 +258,18 @@ class CallTurnController:
             True — продолжение запущено; False — ход отдаётся клиенту.
         """
         if self._lg_client is None or not self._thread_id:
+            logger.info("[turn] продолжение: нет клиента или треда")
             return False
         if self.continuation_count >= self._settings.max_continuations:
+            logger.info(
+                "[turn] продолжение: лимит исчерпан (count=%s max=%s)",
+                self.continuation_count,
+                self._settings.max_continuations,
+            )
             return False
 
         flag = await expects_continuation(self._lg_client, self._thread_id)  # type: ignore[arg-type]
+        logger.info("[turn] продолжение: флаг прочитан, expect_continuation=%s", flag)
         if self._abort_continuation:
             self._abort_continuation = False
             self.continuation_count = 0
@@ -255,11 +279,17 @@ class CallTurnController:
         if not flag:
             return False
         if self.continuation_count >= self._settings.max_continuations:
+            logger.info(
+                "[turn] продолжение: лимит исчерпан (count=%s max=%s)",
+                self.continuation_count,
+                self._settings.max_continuations,
+            )
             return False
 
         self.continuation_count += 1
         self.cancel_silence_timer()
         set_turn_kind(self._session.llm, "continuation")
+        logger.info("[turn] продолжение: запущено #%s", self.continuation_count)
         await self._session.generate_reply()
         return True
 
@@ -287,6 +317,11 @@ class CallTurnController:
             is_last = index >= len(prompts) - 1
             self.silence_attempts = index + 1
 
+            logger.info(
+                "[turn] тишина: попытка #%s, фраза=%r",
+                self.silence_attempts,
+                phrase,
+            )
             self._silence_prompt_active = True
             try:
                 handle = self._session.say(phrase)
@@ -306,6 +341,7 @@ class CallTurnController:
                 return
 
             if is_last:
+                logger.info("[turn] тишина: звонок завершается (исчерпаны фразы-дозвоны)")
                 self._ctx.delete_room()
                 return
 

@@ -143,8 +143,8 @@ async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
     try:
         state = await client.threads.get_state(thread_id)
     except Exception as exc:
-        logger.warning(
-            "Не удалось прочитать expect_continuation (thread_id=%s): %s",
+        logger.info(
+            "[turn] expects_continuation: ошибка чтения (thread_id=%s): %s",
             thread_id,
             exc,
         )
@@ -153,7 +153,7 @@ async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
     values = state.get("values") if isinstance(state, dict) else getattr(state, "values", None)
     if not isinstance(values, dict):
         logger.info(
-            "expect_continuation отсутствует в state (thread_id=%s): values=%s",
+            "[turn] expects_continuation: flag=False (thread_id=%s, values=%s)",
             thread_id,
             type(values).__name__,
         )
@@ -161,9 +161,18 @@ async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
 
     flag = values.get("expect_continuation")
     if flag is None:
-        logger.info("expect_continuation нет в state (thread_id=%s)", thread_id)
+        logger.info(
+            "[turn] expects_continuation: flag=False (thread_id=%s, ключ отсутствует)",
+            thread_id,
+        )
         return False
-    return bool(flag)
+    result = bool(flag)
+    logger.info(
+        "[turn] expects_continuation: flag=%s (thread_id=%s)",
+        result,
+        thread_id,
+    )
+    return result
 
 
 def set_turn_kind(llm: object, turn_kind: str) -> None:
