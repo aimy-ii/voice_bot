@@ -220,7 +220,16 @@ class CallTurnController:
             self.continuation_count += 1
             set_turn_kind(self._session.llm, "continuation")
             logger.info("[turn] продолжение: запущено #%s", self.continuation_count)
-            await self._session.generate_reply()
+            cancelled = False
+            try:
+                await self._session.generate_reply()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                set_turn_kind(self._session.llm, "client")
+                if cancelled:
+                    logger.info("[turn] продолжение: turn_kind возвращён в client после отмены")
             return
 
         if flag:
@@ -236,11 +245,11 @@ class CallTurnController:
         """Вернуть человека ходами ``silence``; после лимита — прощание и конец звонка.
 
         Пока попыток меньше ``silence_attempts``: выставить ``turn_kind=silence``,
-        запустить обычный ход через ``generate_reply``, затем вернуть
-        ``turn_kind=client``. Между попытками ждём ``silence_timeout``.
-        Когда попытки исчерпаны — произнести ``silence_goodbye`` и завершить
-        звонок. Отмена снаружи (клиент заговорил) прерывает цикл через
-        ``CancelledError``.
+        запустить обычный ход через ``generate_reply``, затем в ``finally``
+        вернуть ``turn_kind=client`` (и при отмене тоже). Между попытками
+        ждём ``silence_timeout``. Когда попытки исчерпаны — произнести
+        ``silence_goodbye`` и завершить звонок. Отмена снаружи (клиент
+        заговорил) прерывает цикл через ``CancelledError``.
 
         Returns:
             None.
@@ -254,8 +263,16 @@ class CallTurnController:
                     self.silence_attempts,
                 )
                 set_turn_kind(self._session.llm, "silence")
-                await self._session.generate_reply()
-                set_turn_kind(self._session.llm, "client")
+                cancelled = False
+                try:
+                    await self._session.generate_reply()
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+                finally:
+                    set_turn_kind(self._session.llm, "client")
+                    if cancelled:
+                        logger.info("[turn] тишина: turn_kind возвращён в client после отмены")
 
                 await asyncio.sleep(self._settings.silence_timeout)
 

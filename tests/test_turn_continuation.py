@@ -125,16 +125,23 @@ async def test_expects_continuation_false_on_read_timeout(
 
 @pytest.mark.asyncio
 async def test_finished_with_flag_starts_continuation() -> None:
-    """Флаг стоит → generate_reply, turn_kind=continuation."""
+    """Флаг стоит → generate_reply с continuation, затем turn_kind=client."""
     lg = MagicMock()
     controller = _controller(lg_client=lg)
     session = controller._session
+    seen: list[str] = []
+
+    async def _capture() -> None:
+        seen.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_capture)
 
     with patch.object(main_module, "expects_continuation", AsyncMock(return_value=True)):
         await controller.on_agent_finished_speaking()
 
     session.generate_reply.assert_awaited_once_with()
-    assert session.llm._config["configurable"]["turn_kind"] == "continuation"
+    assert seen == ["continuation"]
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
     assert controller.continuation_count == 1
 
 
@@ -301,6 +308,108 @@ async def test_silence_turn_resets_turn_kind_to_client() -> None:
 
     controller.on_user_present()
     await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_silence_cancel_during_generate_resets_turn_kind_to_client(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отмена во время generate_reply по молчанию → turn_kind=client."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=10.0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    started = asyncio.Event()
+
+    async def _block() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    session.generate_reply = AsyncMock(side_effect=_block)
+
+    with caplog.at_level(logging.INFO, logger="voice_bot"):
+        controller.on_user_away()
+        task = controller.away_task
+        assert task is not None
+
+        await started.wait()
+        assert session.llm._config["configurable"]["turn_kind"] == "silence"
+
+        controller.on_user_present()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
+    assert any("turn_kind возвращён в client после отмены" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_silence_normal_cycle_leaves_turn_kind_client() -> None:
+    """Нормальное завершение цикла окликов → turn_kind=client."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
+    await task
+
+    assert session.generate_reply.await_count == 2
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
+
+
+@pytest.mark.asyncio
+async def test_continuation_resets_turn_kind_to_client_after_generate() -> None:
+    """После запуска продолжения turn_kind возвращается в client."""
+    controller = _controller(lg_client=MagicMock())
+    session = controller._session
+    seen: list[str] = []
+
+    async def _capture() -> None:
+        seen.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_capture)
+
+    with patch.object(main_module, "expects_continuation", AsyncMock(return_value=True)):
+        await controller.on_agent_finished_speaking()
+
+    assert seen == ["continuation"]
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
+
+
+@pytest.mark.asyncio
+async def test_continuation_cancel_during_generate_resets_turn_kind_to_client(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отмена во время generate_reply продолжения → turn_kind=client."""
+    controller = _controller(lg_client=MagicMock())
+    session = controller._session
+    started = asyncio.Event()
+
+    async def _block() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    session.generate_reply = AsyncMock(side_effect=_block)
+
+    with (
+        patch.object(main_module, "expects_continuation", AsyncMock(return_value=True)),
+        caplog.at_level(logging.INFO, logger="voice_bot"),
+    ):
+        task = asyncio.create_task(controller.on_agent_finished_speaking())
+        await started.wait()
+        assert session.llm._config["configurable"]["turn_kind"] == "continuation"
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
+    assert any("turn_kind возвращён в client после отмены" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
