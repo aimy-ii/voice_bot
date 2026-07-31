@@ -242,6 +242,68 @@ async def test_finished_ended_and_continuation_prefers_hangup() -> None:
     cont.assert_not_awaited()
     ctx.delete_room.assert_called_once_with()
     assert controller.continuation_count == 0
+    assert controller._ending is True
+
+
+@pytest.mark.asyncio
+async def test_away_after_conversation_ended_skips_silence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Признак завершения стоит — away не запускает оклик."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=10.0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="до связи из настроек",
+    )
+    controller = _controller(settings=settings, lg_client=MagicMock())
+    session = controller._session
+    session.agent_state = "listening"
+
+    with (
+        patch.object(main_module, "is_conversation_ended", AsyncMock(return_value=True)),
+        patch.object(main_module, "expects_continuation", AsyncMock(return_value=False)),
+    ):
+        await controller.on_agent_finished_speaking()
+
+    with caplog.at_level(logging.INFO, logger="voice_bot"):
+        controller.on_user_away()
+
+    assert controller.away_task is None
+    assert controller.silence_attempts == 0
+    assert controller._silence_deferred is False
+    session.generate_reply.assert_not_called()
+    session.say.assert_not_called()
+    assert any("away проигнорирован: звонок завершается" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_deferred_silence_cancelled_when_conversation_ended() -> None:
+    """Отложенная отметка молчания снимается при завершении по признаку мозга."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=10.0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+    )
+    controller = _controller(settings=settings, lg_client=MagicMock())
+    session = controller._session
+
+    session.agent_state = "speaking"
+    controller.on_user_away()
+    assert controller._silence_deferred is True
+
+    with (
+        patch.object(main_module, "is_conversation_ended", AsyncMock(return_value=True)),
+        patch.object(main_module, "expects_continuation", AsyncMock(return_value=False)),
+    ):
+        await controller.on_agent_finished_speaking()
+
+    assert controller._ending is True
+    assert controller._silence_deferred is False
+
+    session.agent_state = "listening"
+    controller.on_agent_listening()
+    assert controller._listen_away_task is None
+    assert controller.away_task is None
+    session.generate_reply.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -122,6 +122,8 @@ class CallTurnController:
         self.away_task: asyncio.Task[None] | None = None
         self._listen_away_task: asyncio.Task[None] | None = None
         self._silence_deferred: bool = False
+        #: Мозг пометил разговор оконченным — оклики и продолжения больше не нужны.
+        self._ending: bool = False
         self._finished_tasks: set[asyncio.Task[None]] = set()
 
     def attach(self) -> None:
@@ -165,10 +167,15 @@ class CallTurnController:
         Пока бот думает или говорит, тишины нет: событие игнорируется без
         запуска задачи и без изменения счётчика попыток, но ставится
         отметка молчания — оклик догоним после перехода в listening.
+        Если звонок уже завершается по признаку мозга — оклики не нужны.
 
         Returns:
             None.
         """
+        if self._ending:
+            logger.info("[turn] away проигнорирован: звонок завершается")
+            return
+
         agent_state = self._agent_state()
         if agent_state != "listening":
             self._silence_deferred = True
@@ -219,11 +226,14 @@ class CallTurnController:
 
         LiveKit не перевыставляет ``away``, если клиент уже away. Поэтому
         после проигнорированного away сами ждём ``silence_timeout`` с
-        момента listening и запускаем оклики.
+        момента listening и запускаем оклики. При завершении звонка по
+        признаку мозга отсчёт не стартуем.
 
         Returns:
             None.
         """
+        if self._ending:
+            return
         if not self._silence_deferred:
             return
         if self.away_task is not None and not self.away_task.done():
@@ -274,6 +284,8 @@ class CallTurnController:
         except asyncio.CancelledError:
             return
 
+        if self._ending:
+            return
         if self._agent_state() != "listening":
             return
         if not self._silence_deferred:
@@ -322,6 +334,7 @@ class CallTurnController:
 
         if ended:
             logger.info("[turn] звонок завершается: признак conversation_ended от мозга")
+            self._begin_ending()
             await self._hangup_after_brain_goodbye()
             return
 
@@ -362,6 +375,26 @@ class CallTurnController:
             )
         self.continuation_count = 0
         set_turn_kind(self._session.llm, "client")
+
+    def _begin_ending(self) -> None:
+        """Пометить звонок завершающимся и снять отложенные/текущие оклики.
+
+        Returns:
+            None.
+        """
+        self._ending = True
+        self._silence_deferred = False
+        self._cancel_listen_away_wait()
+        task = self.away_task
+        self.away_task = None
+        if task is None or task.done():
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current:
+            task.cancel()
 
     async def _hangup_after_brain_goodbye(self) -> None:
         """Закрыть комнату после прощания от мозга — без ``silence_goodbye``.
