@@ -204,47 +204,126 @@ async def test_max_continuations_stops_monologue() -> None:
 
 
 @pytest.mark.asyncio
-async def test_away_three_prompts_then_delete_room() -> None:
-    """Away → три фразы; после последней — delete_room, без generate_reply."""
+async def test_away_starts_silence_turn() -> None:
+    """Away → generate_reply с turn_kind=silence; say не вызывается."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=10.0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="пока",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+
+    seen: list[str] = []
+
+    async def _capture() -> None:
+        seen.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_capture)
+
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if session.generate_reply.await_count >= 1:
+            break
+
+    assert session.generate_reply.await_count == 1
+    assert seen == ["silence"]
+    session.say.assert_not_called()
+
+    controller.on_user_present()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_away_silence_turns_then_goodbye_and_delete_room() -> None:
+    """Две попытки silence, затем прощание и delete_room."""
     settings = _settings(
         VOICE_BOT_SILENCE_TIMEOUT=0,
-        VOICE_BOT_SILENCE_PROMPTS=["раз", "два", "три"],
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
     )
-    controller = _controller(settings=settings, lg_client=None, thread_id=None)
+    controller = _controller(settings=settings)
     session = controller._session
     ctx = controller._ctx
+
+    turn_kinds: list[str] = []
+
+    async def _track_reply() -> None:
+        turn_kinds.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_track_reply)
 
     controller.on_user_away()
     task = controller.away_task
     assert task is not None
     await task
 
-    assert session.say.call_count == 3
-    assert [c.args[0] for c in session.say.call_args_list] == ["раз", "два", "три"]
+    assert session.generate_reply.await_count == 2
+    assert turn_kinds == ["silence", "silence"]
+    session.say.assert_called_once_with("до связи")
     ctx.delete_room.assert_called_once_with()
-    session.generate_reply.assert_not_called()
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
+    assert controller.silence_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_silence_turn_resets_turn_kind_to_client() -> None:
+    """После хода по молчанию turn_kind возвращается в client."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=10.0,
+        VOICE_BOT_SILENCE_ATTEMPTS=1,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+
+    seen: list[str] = []
+
+    async def _capture() -> None:
+        seen.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_capture)
+
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if session.generate_reply.await_count >= 1:
+            break
+
+    assert seen == ["silence"]
+    assert session.llm._config["configurable"]["turn_kind"] == "client"
+
+    controller.on_user_present()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
 async def test_user_present_cancels_away_prompts() -> None:
-    """Клиент заговорил во время окликов — задача снята, следующая фраза не звучит."""
+    """Клиент заговорил между попытками — цикл прерван, счётчик обнулён."""
     settings = _settings(
         VOICE_BOT_SILENCE_TIMEOUT=0.5,
-        VOICE_BOT_SILENCE_PROMPTS=["раз", "два", "три"],
+        VOICE_BOT_SILENCE_ATTEMPTS=3,
+        VOICE_BOT_SILENCE_GOODBYE="пока",
     )
-    controller = _controller(settings=settings, lg_client=None, thread_id=None)
+    controller = _controller(settings=settings)
     session = controller._session
 
     controller.on_user_away()
     task = controller.away_task
     assert task is not None
 
-    # Дать первой фразе прозвучать и уйти в sleep между окликами.
+    # Дать первому ходу silence завершиться и уйти в sleep между попытками.
     for _ in range(20):
         await asyncio.sleep(0)
-        if session.say.call_count >= 1:
+        if session.generate_reply.await_count >= 1:
             break
-    assert session.say.call_count == 1
+    assert session.generate_reply.await_count == 1
 
     controller.on_user_present()
     assert controller.silence_attempts == 0
@@ -253,7 +332,8 @@ async def test_user_present_cancels_away_prompts() -> None:
     await asyncio.gather(task, return_exceptions=True)
 
     await asyncio.sleep(0.6)
-    assert session.say.call_count == 1
+    assert session.generate_reply.await_count == 1
+    session.say.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -261,9 +341,9 @@ async def test_duplicate_away_does_not_start_second_task() -> None:
     """Повторный away при уже идущей задаче не запускает вторую."""
     settings = _settings(
         VOICE_BOT_SILENCE_TIMEOUT=1.0,
-        VOICE_BOT_SILENCE_PROMPTS=["раз", "два"],
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
     )
-    controller = _controller(settings=settings, lg_client=None, thread_id=None)
+    controller = _controller(settings=settings)
 
     controller.on_user_away()
     first = controller.away_task

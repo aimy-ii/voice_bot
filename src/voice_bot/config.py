@@ -116,15 +116,13 @@ class Settings(BaseSettings):
     # --- Тишина клиента и продолжение собственной речи бота ---
     #: Через сколько тишины считать, что клиент пропал. Ноль и None — выключено.
     silence_timeout: float = Field(default=6.0, alias="VOICE_BOT_SILENCE_TIMEOUT")
-    #: Фразы на тишину по порядку: последняя произносится перед завершением звонка.
-    silence_prompts: list[str] = Field(
-        default_factory=lambda: [
-            "Алло, вы меня слышите?",
-            "Алло, вы на связи?",
-            "Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить.",
-        ],
-        alias="VOICE_BOT_SILENCE_PROMPTS",
+    #: Что сказать перед завершением звонка, когда человек так и не ответил.
+    silence_goodbye: str = Field(
+        default="Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить.",
+        alias="VOICE_BOT_SILENCE_GOODBYE",
     )
+    #: Сколько раз пробуем вернуть человека в разговор, прежде чем прощаться.
+    silence_attempts: int = Field(default=2, alias="VOICE_BOT_SILENCE_ATTEMPTS")
     #: Сколько продолжений подряд разрешено, страховка от монолога.
     max_continuations: int = Field(default=3, alias="VOICE_BOT_MAX_CONTINUATIONS")
 

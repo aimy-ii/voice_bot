@@ -195,8 +195,8 @@ def set_turn_kind(llm: object, turn_kind: str) -> None:
 
     Args:
         llm: плагин сессии (ожидается ``LLMAdapter`` с ``_config``).
-        turn_kind: ``client`` для обычного хода или ``continuation`` для
-            продолжения без реплики клиента.
+        turn_kind: ``client`` для обычного хода, ``continuation`` для
+            продолжения без реплики клиента, ``silence`` — человек молчит.
     """
     config = getattr(llm, "_config", None)
     if not isinstance(config, dict):

@@ -103,7 +103,7 @@ class CallTurnController:
         Args:
             session: голосовая сессия текущего звонка.
             ctx: контекст задания LiveKit (нужен ``delete_room``).
-            settings: таймаут тишины, фразы и лимит продолжений.
+            settings: таймаут тишины, лимит попыток и продолжений.
             thread_id: UUID треда основного графа; ``None`` — без продолжений.
             lg_client: клиент LangGraph для чтения ``expect_continuation``.
         """
@@ -233,43 +233,44 @@ class CallTurnController:
         set_turn_kind(self._session.llm, "client")
 
     async def _away_prompts(self) -> None:
-        """Произнести фразы-оклики по порядку; после последней завершить звонок.
+        """Вернуть человека ходами ``silence``; после лимита — прощание и конец звонка.
 
-        Между фразами ждём ``silence_timeout``. Отмена снаружи (клиент
-        заговорил) прерывает цикл через ``CancelledError``.
+        Пока попыток меньше ``silence_attempts``: выставить ``turn_kind=silence``,
+        запустить обычный ход через ``generate_reply``, затем вернуть
+        ``turn_kind=client``. Между попытками ждём ``silence_timeout``.
+        Когда попытки исчерпаны — произнести ``silence_goodbye`` и завершить
+        звонок. Отмена снаружи (клиент заговорил) прерывает цикл через
+        ``CancelledError``.
 
         Returns:
             None.
         """
         try:
-            prompts = self._settings.silence_prompts
-            if not prompts:
-                return
-
-            while True:
-                index = min(self.silence_attempts, len(prompts) - 1)
-                phrase = prompts[index]
-                is_last = index >= len(prompts) - 1
-                self.silence_attempts = index + 1
-
+            max_attempts = self._settings.silence_attempts
+            while self.silence_attempts < max_attempts:
+                self.silence_attempts += 1
                 logger.info(
-                    "[turn] тишина: попытка #%s, фраза=%r",
+                    "[turn] тишина: попытка #%s, ход silence",
                     self.silence_attempts,
-                    phrase,
                 )
-                handle = self._session.say(phrase)
-                wait = getattr(handle, "wait_for_playout", None)
-                if callable(wait):
-                    result = wait()
-                    if inspect.isawaitable(result):
-                        await result
-
-                if is_last:
-                    logger.info("[turn] тишина: звонок завершается (исчерпаны фразы-дозвоны)")
-                    self._ctx.delete_room()
-                    return
+                set_turn_kind(self._session.llm, "silence")
+                await self._session.generate_reply()
+                set_turn_kind(self._session.llm, "client")
 
                 await asyncio.sleep(self._settings.silence_timeout)
+
+            goodbye = self._settings.silence_goodbye
+            logger.info(
+                "[turn] тишина: звонок завершается (исчерпаны попытки), фраза=%r",
+                goodbye,
+            )
+            handle = self._session.say(goodbye)
+            wait = getattr(handle, "wait_for_playout", None)
+            if callable(wait):
+                result = wait()
+                if inspect.isawaitable(result):
+                    await result
+            self._ctx.delete_room()
         except asyncio.CancelledError:
             return
 
@@ -327,8 +328,8 @@ def _attach_turn_controller(
 
     Args:
         session: голосовая сессия текущего звонка.
-        ctx: контекст задания (завершение комнаты после последней фразы).
-        settings: таймаут, фразы тишины и лимит продолжений.
+        ctx: контекст задания (завершение комнаты после прощальной фразы).
+        settings: таймаут тишины, лимит попыток и продолжений.
         room_name: имя комнаты LiveKit для ``thread_id`` основного графа.
 
     Returns:

@@ -390,15 +390,15 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     """Дефолты тишины и лимита продолжений без переменных окружения."""
     _set_required_env(monkeypatch)
     monkeypatch.delenv("VOICE_BOT_SILENCE_TIMEOUT", raising=False)
-    monkeypatch.delenv("VOICE_BOT_SILENCE_PROMPTS", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_GOODBYE", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_ATTEMPTS", raising=False)
     monkeypatch.delenv("VOICE_BOT_MAX_CONTINUATIONS", raising=False)
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert settings.silence_timeout == 6.0
     assert settings.max_continuations == 3
-    assert settings.silence_prompts == [
-        "Алло, вы меня слышите?",
-        "Алло, вы на связи?",
-        "Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить.",
-    ]
+    assert settings.silence_attempts == 2
+    assert (
+        settings.silence_goodbye == "Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить."
+    )
