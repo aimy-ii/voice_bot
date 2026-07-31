@@ -190,6 +190,62 @@ async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
     return result
 
 
+async def is_conversation_ended(client: LangGraphClient, thread_id: str) -> bool:
+    """Пометил ли мозг разговор как законченный (прощание после закрытых шагов).
+
+    Args:
+        client: клиент LangGraph, тот же, что и для основного графа.
+        thread_id: идентификатор треда звонка.
+
+    Returns:
+        True — звонок пора завершить без новой реплики.
+        Любая ошибка или таймаут чтения — False: безопаснее не рвать линию.
+    """
+    try:
+        state = await asyncio.wait_for(
+            client.threads.get_state(thread_id),
+            timeout=CONTINUATION_READ_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.info(
+            "[turn] is_conversation_ended: таймаут чтения (thread_id=%s, timeout=%sс)",
+            thread_id,
+            CONTINUATION_READ_TIMEOUT,
+        )
+        return False
+    except Exception as exc:
+        logger.info(
+            "[turn] is_conversation_ended: ошибка чтения (thread_id=%s): %s",
+            thread_id,
+            exc,
+        )
+        return False
+
+    values = state.get("values") if isinstance(state, dict) else getattr(state, "values", None)
+    if not isinstance(values, dict):
+        logger.info(
+            "[turn] is_conversation_ended: flag=False (thread_id=%s, values=%s)",
+            thread_id,
+            type(values).__name__,
+        )
+        return False
+
+    flag = values.get("conversation_ended")
+    if flag is None:
+        logger.info(
+            "[turn] is_conversation_ended: flag=False (thread_id=%s, ключ отсутствует)",
+            thread_id,
+        )
+        return False
+    result = bool(flag)
+    logger.info(
+        "[turn] is_conversation_ended: flag=%s (thread_id=%s)",
+        result,
+        thread_id,
+    )
+    return result
+
+
 def set_turn_kind(llm: object, turn_kind: str) -> None:
     """Записать ``turn_kind`` в ``configurable`` адаптера LLM (рядом с thread_id).
 

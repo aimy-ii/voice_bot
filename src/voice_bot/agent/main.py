@@ -36,6 +36,7 @@ from voice_bot.agent.session import (
     build_partial_transcript_sender,
     build_session,
     expects_continuation,
+    is_conversation_ended,
     set_turn_kind,
     thread_id_for_room,
 )
@@ -108,7 +109,7 @@ class CallTurnController:
             ctx: контекст задания LiveKit (нужен ``delete_room``).
             settings: таймаут тишины, лимит попыток и продолжений.
             thread_id: UUID треда основного графа; ``None`` — без продолжений.
-            lg_client: клиент LangGraph для чтения ``expect_continuation``.
+            lg_client: клиент LangGraph для чтения флагов продолжения и завершения.
         """
         self._session = session
         self._ctx = ctx
@@ -297,15 +298,33 @@ class CallTurnController:
         task.add_done_callback(self._finished_tasks.discard)
 
     async def on_agent_finished_speaking(self) -> None:
-        """После реплики бота: прочитать флаг продолжения и при необходимости запустить ход.
+        """После реплики бота: завершить звонок или продолжить речь по флагам мозга.
 
-        Ранних выходов до чтения флага нет. Ошибка или таймаут чтения —
-        считаем, что флага нет. Лимит ``max_continuations`` проверяется
-        вместе с флагом.
+        Сначала читаем ``conversation_ended``: если стоит — закрываем комнату
+        без прощальной фразы из настроек (бот уже попрощался сам). Завершение
+        приоритетнее продолжения. Иначе читаем ``expect_continuation``.
+        Ошибка или таймаут чтения — считаем, что флага нет. Лимит
+        ``max_continuations`` проверяется вместе с флагом продолжения.
 
         Returns:
             None.
         """
+        ended = False
+        try:
+            if self._lg_client is not None and self._thread_id:
+                ended = await is_conversation_ended(
+                    self._lg_client,  # type: ignore[arg-type]
+                    self._thread_id,
+                )
+        except Exception as exc:
+            logger.info("[turn] завершение: ошибка чтения признака: %s", exc)
+            ended = False
+
+        if ended:
+            logger.info("[turn] звонок завершается: признак conversation_ended от мозга")
+            await self._hangup_after_brain_goodbye()
+            return
+
         flag = False
         try:
             if self._lg_client is not None and self._thread_id:
@@ -343,6 +362,23 @@ class CallTurnController:
             )
         self.continuation_count = 0
         set_turn_kind(self._session.llm, "client")
+
+    async def _hangup_after_brain_goodbye(self) -> None:
+        """Закрыть комнату после прощания от мозга — без ``silence_goodbye``.
+
+        Реплика бота уже доиграла (мы здесь после ``speaking`` → …); дополнительно
+        ждём ``wait_for_playout`` у текущей речи, если сессия его отдаёт.
+
+        Returns:
+            None.
+        """
+        speech = getattr(self._session, "current_speech", None)
+        wait = getattr(speech, "wait_for_playout", None) if speech is not None else None
+        if callable(wait):
+            result = wait()
+            if inspect.isawaitable(result):
+                await result
+        self._ctx.delete_room()
 
     async def _away_prompts(self) -> None:
         """Вернуть человека ходами ``silence``; после лимита — прощание и конец звонка.
