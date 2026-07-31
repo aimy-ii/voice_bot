@@ -207,6 +207,44 @@ def set_turn_kind(llm: object, turn_kind: str) -> None:
     configurable["turn_kind"] = turn_kind
 
 
+def chat_history_snapshot(session: AgentSession | None) -> list[dict[str, str]]:
+    """Снять снимок реплик диалога из истории сессии.
+
+    Берёт только ``session.history.messages()`` (не ``items``): там лежат
+    реплики, без системных ``AgentConfigUpdate``. Роли ``user``/``assistant``
+    мапятся в ``human``/``ai``; ``system`` и ``developer`` пропускаются.
+    Текст — как в ``text_content`` после ``.strip()`` по краям, без иной
+    нормализации. Пустые сообщения отбрасываются. Обрезки нет.
+
+    Args:
+        session: голосовая сессия или ``None``.
+
+    Returns:
+        Список словарей ``{"type": "human"|"ai", "content": "..."}``
+        в порядке истории; пустой список, если сессии нет или сообщений нет.
+    """
+    if session is None:
+        return []
+
+    snapshot: list[dict[str, str]] = []
+    for msg in session.history.messages():
+        role = getattr(msg, "role", None)
+        if role == "user":
+            msg_type = "human"
+        elif role == "assistant":
+            msg_type = "ai"
+        else:
+            continue
+        text = getattr(msg, "text_content", None)
+        if not isinstance(text, str):
+            continue
+        content = text.strip()
+        if not content:
+            continue
+        snapshot.append({"type": msg_type, "content": content})
+    return snapshot
+
+
 class PartialTranscriptSender:
     """Фоновая отправка накопленного STT на служебный граф ``vector_checker``.
 
@@ -214,7 +252,11 @@ class PartialTranscriptSender:
     и промежуточный, и финальный текст, без вмешательства в конвейер STT.
     Каждый раз уходит **весь** накопленный текст реплики в поле
     ``partial_reply``, не дельта. Вместе с текстом — ``partial_utterance_id``
-    (свой на реплику) и ``partial_is_final``. HTTP ставится через
+    (свой на реплику), ``partial_is_final`` и при наличии — снимок истории
+    диалога в ``messages`` (роли ``human``/``ai``), чтобы судья видел вопрос
+    бота, на который отвечает клиент. Снимок снимается **синхронно** в
+    ``on_transcript`` перед постановкой задачи: иначе фоновая отправка
+    могла бы прочитать уже следующую реплику бота. HTTP ставится через
     ``asyncio.create_task`` — обработчик хода не ждёт ответа; ошибки и
     таймауты только в лог. Служебные run идут на отдельном лайв-треде со
     ``multitask_strategy="interrupt"``; скрипт в кеше мозга ключуется
@@ -241,6 +283,7 @@ class PartialTranscriptSender:
         self._graph = graph
         self._thread_id = thread_id
         self._call_id = call_id
+        self._session: AgentSession | None = None
         self._sending = True
         self._committed = ""
         self._last_sent = ""
@@ -264,6 +307,7 @@ class PartialTranscriptSender:
         Args:
             session: голосовая сессия текущего звонка.
         """
+        self._session = session
 
         @session.on("user_input_transcribed")
         def _on_transcript(ev: UserInputTranscribedEvent) -> None:
@@ -295,10 +339,13 @@ class PartialTranscriptSender:
         if not payload or payload == self._last_sent:
             return
         self._last_sent = payload
+        # Снимок синхронно здесь: к моменту _send история уже может вырасти.
+        messages = chat_history_snapshot(self._session)
         self._schedule_send(
             payload,
             utterance_id=self._utterance_id,
             is_final=ev.is_final,
+            messages=messages,
         )
 
     def on_user_state(self, ev: UserStateChangedEvent) -> None:
@@ -313,13 +360,21 @@ class PartialTranscriptSender:
             self._last_sent = ""
             self._utterance_id = str(uuid.uuid4())
 
-    def _schedule_send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
+    def _schedule_send(
+        self,
+        text: str,
+        *,
+        utterance_id: str,
+        is_final: bool,
+        messages: list[dict[str, str]],
+    ) -> None:
         """Поставить отправку в фон; исключения гасятся в done-callback.
 
         Args:
             text: накопленный текст реплики целиком.
             utterance_id: идентификатор реплики на момент постановки.
             is_final: ``True``, если кусок — финальный распознанный текст.
+            messages: снимок истории на момент постановки (не читать в фоне).
         """
         try:
             loop = asyncio.get_running_loop()
@@ -331,7 +386,12 @@ class PartialTranscriptSender:
             return
 
         task = loop.create_task(
-            self._send(text, utterance_id=utterance_id, is_final=is_final),
+            self._send(
+                text,
+                utterance_id=utterance_id,
+                is_final=is_final,
+                messages=messages,
+            ),
             name="agent-partial-transcript",
         )
         self._tasks.add(task)
@@ -354,7 +414,14 @@ class PartialTranscriptSender:
                 exc,
             )
 
-    async def _send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
+    async def _send(
+        self,
+        text: str,
+        *,
+        utterance_id: str,
+        is_final: bool,
+        messages: list[dict[str, str]],
+    ) -> None:
         """Поставить фоновый run на ``vector_checker``; ответ не читаем.
 
         Граф читает накопленный текст из ``partial_reply``. Новый служебный
@@ -363,16 +430,19 @@ class PartialTranscriptSender:
         ``call_id`` в ``configurable`` указывает на скрипт того же звонка.
         ``partial_utterance_id`` стабилен внутри реплики; мозг сбрасывает
         точку отсчёта прироста при смене идентификатора.
+        Непустой ``messages`` — снимок диалога на момент постановки отправки.
 
         Args:
             text: накопленный распознанный текст целиком.
             utterance_id: идентификатор реплики на момент постановки отправки.
             is_final: ``True``, если это финальный распознанный текст реплики.
+            messages: снимок истории; пустой список в ``input`` не кладём.
         """
         preview = text[:40]
         logger.info(
             "[live] отправка в %s: %d симв., «%s» "
-            "(live_thread=%s, call_id=%s, utterance_id=%s, is_final=%s)",
+            "(live_thread=%s, call_id=%s, utterance_id=%s, is_final=%s, "
+            "messages=%d)",
             self._graph,
             len(text),
             preview,
@@ -380,16 +450,20 @@ class PartialTranscriptSender:
             self._call_id,
             utterance_id,
             is_final,
+            len(messages),
         )
+        payload: dict[str, Any] = {
+            "partial_reply": text,
+            "partial_utterance_id": utterance_id,
+            "partial_is_final": is_final,
+        }
+        if messages:
+            payload["messages"] = messages
         try:
             await self._client.runs.create(
                 thread_id=self._thread_id,
                 assistant_id=self._graph,
-                input={
-                    "partial_reply": text,
-                    "partial_utterance_id": utterance_id,
-                    "partial_is_final": is_final,
-                },
+                input=payload,
                 config={"configurable": {"call_id": self._call_id}},
                 if_not_exists="create",
                 # Свежий кусок важнее очереди устаревших гипотез на лайв-треде.

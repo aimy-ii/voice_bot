@@ -13,6 +13,7 @@ from voice_bot.agent import main as main_module
 from voice_bot.agent import session as session_module
 from voice_bot.agent.session import (
     PartialTranscriptSender,
+    chat_history_snapshot,
     live_thread_id_for_room,
     thread_id_for_room,
 )
@@ -342,3 +343,240 @@ def test_attach_partial_when_enabled_subscribes() -> None:
     build_mock.assert_called_once()
     assert build_mock.call_args.kwargs["room_name"] == "room-x"
     fake_sender.attach.assert_called_once_with(session)
+
+
+class _FakeMsg:
+    """Заглушка сообщения истории с ``role`` и ``text_content``."""
+
+    def __init__(self, role: str, text: str) -> None:
+        """Сохранить роль и текст.
+
+        Args:
+            role: роль в терминах LiveKit (``user``/``assistant``/…).
+            text: содержимое ``text_content``.
+        """
+        self.role = role
+        self._text = text
+
+    @property
+    def text_content(self) -> str:
+        """Текст реплики, как у ChatMessage LiveKit."""
+        return self._text
+
+
+class _FakeHistory:
+    """Заглушка ``session.history`` с методом ``messages()``."""
+
+    def __init__(self, messages: list[_FakeMsg] | None = None) -> None:
+        """Сохранить список сообщений.
+
+        Args:
+            messages: начальный список или ``None`` (пустая история).
+        """
+        self._messages = list(messages or [])
+
+    def messages(self) -> list[_FakeMsg]:
+        """Вернуть текущий список реплик.
+
+        Returns:
+            Копия списка сообщений.
+        """
+        return list(self._messages)
+
+    def set_messages(self, messages: list[_FakeMsg]) -> None:
+        """Заменить историю (для проверки снимка «на момент постановки»).
+
+        Args:
+            messages: новый список сообщений.
+        """
+        self._messages = list(messages)
+
+
+class _FakeSession:
+    """Заглушка сессии с атрибутом ``history``."""
+
+    def __init__(self, messages: list[_FakeMsg] | None = None) -> None:
+        """Собрать сессию с историей.
+
+        Args:
+            messages: начальные реплики или ``None``.
+        """
+        self.history = _FakeHistory(messages)
+
+
+def test_chat_history_snapshot_roles_and_order() -> None:
+    """Роли ``user``/``assistant`` → ``human``/``ai``, порядок сохранён."""
+    session = _FakeSession(
+        [
+            _FakeMsg("assistant", "Здравствуйте"),
+            _FakeMsg("user", "Добрый день"),
+            _FakeMsg("assistant", "Чем помочь?"),
+        ]
+    )
+    assert chat_history_snapshot(session) == [  # type: ignore[arg-type]
+        {"type": "ai", "content": "Здравствуйте"},
+        {"type": "human", "content": "Добрый день"},
+        {"type": "ai", "content": "Чем помочь?"},
+    ]
+
+
+def test_chat_history_snapshot_skips_system_and_developer() -> None:
+    """Роли ``system`` и ``developer`` в снимок не попадают."""
+    session = _FakeSession(
+        [
+            _FakeMsg("system", "инструкция"),
+            _FakeMsg("assistant", "Вопрос?"),
+            _FakeMsg("developer", "служебно"),
+            _FakeMsg("user", "Ответ"),
+        ]
+    )
+    assert chat_history_snapshot(session) == [  # type: ignore[arg-type]
+        {"type": "ai", "content": "Вопрос?"},
+        {"type": "human", "content": "Ответ"},
+    ]
+
+
+def test_chat_history_snapshot_preserves_punctuation_and_case() -> None:
+    """Пунктуация и регистр (включая «ё») доезжают без изменений."""
+    question = "В каком районе Вам удобнее?"
+    reply = "Хорошо, записываю."
+    with_yo = "Ещё раз уточню район."
+    session = _FakeSession(
+        [
+            _FakeMsg("assistant", question),
+            _FakeMsg("user", reply),
+            _FakeMsg("assistant", with_yo),
+        ]
+    )
+    snap = chat_history_snapshot(session)  # type: ignore[arg-type]
+    assert snap[0]["content"] == question
+    assert snap[1]["content"] == reply
+    assert snap[2]["content"] == with_yo
+    assert snap[0]["content"].endswith("?")
+    assert snap[1]["content"].endswith(".")
+    assert "ё" in snap[2]["content"]
+    assert snap[2]["content"] == "Ещё раз уточню район."
+
+
+def test_chat_history_snapshot_skips_empty_text() -> None:
+    """Сообщения с пустым текстом (после strip) отбрасываются."""
+    session = _FakeSession(
+        [
+            _FakeMsg("assistant", "  "),
+            _FakeMsg("user", "ок"),
+            _FakeMsg("assistant", ""),
+        ]
+    )
+    assert chat_history_snapshot(session) == [  # type: ignore[arg-type]
+        {"type": "human", "content": "ок"},
+    ]
+
+
+def test_chat_history_snapshot_no_truncation() -> None:
+    """Обрезки нет: сто сообщений в истории — сто в снимке."""
+    msgs = [_FakeMsg("assistant" if i % 2 == 0 else "user", f"реплика {i}") for i in range(100)]
+    session = _FakeSession(msgs)
+    snap = chat_history_snapshot(session)  # type: ignore[arg-type]
+    assert len(snap) == 100
+    assert snap[0] == {"type": "ai", "content": "реплика 0"}
+    assert snap[99] == {"type": "human", "content": "реплика 99"}
+
+
+def test_chat_history_snapshot_none_and_empty() -> None:
+    """``session is None`` и пустая история — пустой список."""
+    assert chat_history_snapshot(None) == []
+    assert chat_history_snapshot(_FakeSession([])) == []  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_partial_without_session_omits_messages_key() -> None:
+    """Без сессии / с пустой историей ключ ``messages`` в ``input`` отсутствует."""
+    sender, runs_create = _make_sender()
+    assert sender._session is None
+
+    sender.on_transcript(UserInputTranscribedEvent(transcript="без истории", is_final=False))
+    await _drain(sender)
+
+    payload = runs_create.await_args.kwargs["input"]
+    assert "messages" not in payload
+
+    empty_session = _FakeSession([])
+    sender._session = empty_session  # type: ignore[assignment]
+    sender.on_user_state(UserStateChangedEvent(old_state="listening", new_state="speaking"))
+    sender.on_transcript(UserInputTranscribedEvent(transcript="пустая", is_final=False))
+    await _drain(sender)
+
+    payload2 = runs_create.await_args.kwargs["input"]
+    assert "messages" not in payload2
+
+
+@pytest.mark.asyncio
+async def test_partial_snapshot_taken_at_schedule_not_send() -> None:
+    """Снимок соответствует моменту постановки, а не отправки."""
+    history = _FakeHistory(
+        [
+            _FakeMsg("assistant", "В каком районе Вам удобнее?"),
+            _FakeMsg("user", "Центр"),
+        ]
+    )
+    session = _FakeSession()
+    session.history = history
+
+    gate = asyncio.Event()
+
+    async def _delayed(**_kwargs: object) -> dict[str, str]:
+        await gate.wait()
+        return {"run_id": "r1"}
+
+    sender, runs_create = _make_sender(create=AsyncMock(side_effect=_delayed))
+    sender._session = session  # type: ignore[assignment]
+
+    sender.on_transcript(UserInputTranscribedEvent(transcript="Центр", is_final=False))
+    # История меняется уже после постановки задачи, до HTTP.
+    history.set_messages(
+        [
+            _FakeMsg("assistant", "В каком районе Вам удобнее?"),
+            _FakeMsg("user", "Центр"),
+            _FakeMsg("assistant", "Хорошо, записываю."),
+        ]
+    )
+    gate.set()
+    await _drain(sender)
+
+    payload = runs_create.await_args.kwargs["input"]
+    assert payload["messages"] == [
+        {"type": "ai", "content": "В каком районе Вам удобнее?"},
+        {"type": "human", "content": "Центр"},
+    ]
+    assert len(payload["messages"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_partial_with_history_keeps_core_fields() -> None:
+    """Отправка с историей не ломает partial_*, лайв-тред и call_id."""
+    session = _FakeSession(
+        [
+            _FakeMsg("assistant", "В каком районе Вам удобнее?"),
+            _FakeMsg("user", "Хорошо, записываю."),
+        ]
+    )
+    sender, runs_create = _make_sender()
+    sender._session = session  # type: ignore[assignment]
+
+    sender.on_transcript(UserInputTranscribedEvent(transcript="Хорошо, записываю.", is_final=True))
+    await _drain(sender)
+
+    kwargs = runs_create.await_args.kwargs
+    payload = kwargs["input"]
+    assert payload["partial_reply"] == "Хорошо, записываю."
+    assert isinstance(payload["partial_utterance_id"], str)
+    uuid.UUID(payload["partial_utterance_id"])
+    assert payload["partial_is_final"] is True
+    assert payload["messages"] == [
+        {"type": "ai", "content": "В каком районе Вам удобнее?"},
+        {"type": "human", "content": "Хорошо, записываю."},
+    ]
+    assert kwargs["thread_id"] == sender.thread_id
+    assert kwargs["config"] == {"configurable": {"call_id": sender.call_id}}
+    assert kwargs["assistant_id"] == "vector_checker"
+    assert kwargs["multitask_strategy"] == "interrupt"
