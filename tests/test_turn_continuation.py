@@ -216,7 +216,7 @@ async def test_max_continuations_stops_monologue() -> None:
 async def test_away_while_thinking_does_not_start_silence(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Away при thinking — оклик не запускается, счётчик не меняется."""
+    """Away при thinking — оклик не запускается, ставится отложенная отметка."""
     settings = _settings(
         VOICE_BOT_SILENCE_TIMEOUT=10.0,
         VOICE_BOT_SILENCE_ATTEMPTS=2,
@@ -231,6 +231,7 @@ async def test_away_while_thinking_does_not_start_silence(
 
     assert controller.away_task is None
     assert controller.silence_attempts == 0
+    assert controller._silence_deferred is True
     session.generate_reply.assert_not_called()
     assert any(
         "away проигнорирован" in r.message and "thinking" in r.message for r in caplog.records
@@ -241,7 +242,7 @@ async def test_away_while_thinking_does_not_start_silence(
 async def test_away_while_speaking_does_not_start_silence(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Away при speaking — оклик не запускается, счётчик не меняется."""
+    """Away при speaking — оклик не запускается, ставится отложенная отметка."""
     settings = _settings(
         VOICE_BOT_SILENCE_TIMEOUT=10.0,
         VOICE_BOT_SILENCE_ATTEMPTS=2,
@@ -256,6 +257,7 @@ async def test_away_while_speaking_does_not_start_silence(
 
     assert controller.away_task is None
     assert controller.silence_attempts == 1
+    assert controller._silence_deferred is True
     session.generate_reply.assert_not_called()
     assert any(
         "away проигнорирован" in r.message and "speaking" in r.message for r in caplog.records
@@ -284,6 +286,7 @@ async def test_away_starts_silence_turn() -> None:
     controller.on_user_away()
     task = controller.away_task
     assert task is not None
+    assert controller._silence_deferred is False
 
     for _ in range(20):
         await asyncio.sleep(0)
@@ -299,10 +302,12 @@ async def test_away_starts_silence_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_silence_after_bot_spoke_while_user_was_away() -> None:
-    """Человек молчал во время речи бота → после listening оклик срабатывает."""
+async def test_deferred_silence_after_speaking_away(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Away при speaking → listening, человек молчит — оклик после таймаута от перехода."""
     settings = _settings(
-        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_TIMEOUT=0.05,
         VOICE_BOT_SILENCE_ATTEMPTS=2,
         VOICE_BOT_SILENCE_GOODBYE="пока",
     )
@@ -310,9 +315,9 @@ async def test_silence_after_bot_spoke_while_user_was_away() -> None:
     session = controller._session
 
     session.agent_state = "speaking"
-    session.user_state = "away"
     controller.on_user_away()
     assert controller.away_task is None
+    assert controller._silence_deferred is True
     assert controller.silence_attempts == 0
     session.generate_reply.assert_not_called()
 
@@ -320,7 +325,10 @@ async def test_silence_after_bot_spoke_while_user_was_away() -> None:
     controller.on_agent_listening()
     wait_task = controller._listen_away_task
     assert wait_task is not None
-    await wait_task
+    assert controller.away_task is None
+
+    with caplog.at_level(logging.INFO, logger="voice_bot"):
+        await wait_task
 
     task = controller.away_task
     assert task is not None
@@ -332,6 +340,84 @@ async def test_silence_after_bot_spoke_while_user_was_away() -> None:
 
     assert session.generate_reply.await_count >= 1
     assert controller.silence_attempts >= 1
+    assert any("оклик по отложенной отметке" in r.message for r in caplog.records)
+
+    controller.on_user_present()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_deferred_silence_cancelled_when_user_speaks_before_timeout() -> None:
+    """Away при speaking → listening, человек заговорил до таймаута — оклика нет."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0.5,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="пока",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+
+    session.agent_state = "speaking"
+    controller.on_user_away()
+    assert controller._silence_deferred is True
+
+    session.agent_state = "listening"
+    controller.on_agent_listening()
+    wait_task = controller._listen_away_task
+    assert wait_task is not None
+
+    controller.on_user_present()
+    assert controller._silence_deferred is False
+    assert controller._listen_away_task is None
+    assert controller.silence_attempts == 0
+    assert controller.away_task is None
+
+    await asyncio.gather(wait_task, return_exceptions=True)
+    await asyncio.sleep(0.6)
+
+    session.generate_reply.assert_not_called()
+    assert controller.silence_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_deferred_silence_mark_does_not_accumulate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Два проигнорированных away подряд → один оклик после listening."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="пока",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    started = asyncio.Event()
+
+    async def _block() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    session.generate_reply = AsyncMock(side_effect=_block)
+
+    session.agent_state = "speaking"
+    controller.on_user_away()
+    controller.on_user_away()
+    assert controller._silence_deferred is True
+    assert controller.away_task is None
+
+    session.agent_state = "listening"
+    with caplog.at_level(logging.INFO, logger="voice_bot"):
+        controller.on_agent_listening()
+        wait_task = controller._listen_away_task
+        assert wait_task is not None
+        await wait_task
+        await started.wait()
+
+    task = controller.away_task
+    assert task is not None
+    deferred_logs = [r for r in caplog.records if "оклик по отложенной отметке" in r.message]
+    assert len(deferred_logs) == 1
+    assert session.generate_reply.await_count == 1
 
     controller.on_user_present()
     await asyncio.gather(task, return_exceptions=True)

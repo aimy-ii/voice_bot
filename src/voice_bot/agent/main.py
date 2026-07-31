@@ -87,8 +87,9 @@ class CallTurnController:
 
     Тишину детектит LiveKit (``user_away_timeout``): таймер идёт, пока оба
     в ``listening``. Оклик запускаем только когда бот слушает; если away
-    пришёл во время thinking/speaking — игнорируем и при возврате бота
-    в listening ждём ``silence_timeout``, затем стартуем оклики.
+    пришёл во время thinking/speaking — ставим отметку молчания и при
+    возврате бота в listening ждём ``silence_timeout`` с этого момента,
+    затем стартуем оклики.
     """
 
     def __init__(
@@ -119,6 +120,7 @@ class CallTurnController:
         self.silence_attempts: int = 0
         self.away_task: asyncio.Task[None] | None = None
         self._listen_away_task: asyncio.Task[None] | None = None
+        self._silence_deferred: bool = False
         self._finished_tasks: set[asyncio.Task[None]] = set()
 
     def attach(self) -> None:
@@ -156,32 +158,26 @@ class CallTurnController:
         state = getattr(self._session, "agent_state", "listening")
         return state if isinstance(state, str) else "listening"
 
-    def _user_state(self) -> str:
-        """Текущее состояние клиента сессии (для тестов — атрибут заглушки).
-
-        Returns:
-            Строка состояния; при отсутствии атрибута — ``listening``.
-        """
-        state = getattr(self._session, "user_state", "listening")
-        return state if isinstance(state, str) else "listening"
-
     def on_user_away(self) -> None:
         """Клиент пропал (``away``): запустить оклики, если бот слушает.
 
         Пока бот думает или говорит, тишины нет: событие игнорируется без
-        запуска задачи и без изменения счётчика попыток.
+        запуска задачи и без изменения счётчика попыток, но ставится
+        отметка молчания — оклик догоним после перехода в listening.
 
         Returns:
             None.
         """
         agent_state = self._agent_state()
         if agent_state != "listening":
+            self._silence_deferred = True
             logger.info(
                 "[turn] away проигнорирован: бот не слушает (agent_state=%s)",
                 agent_state,
             )
             return
 
+        self._silence_deferred = False
         self._cancel_listen_away_wait()
         if self.away_task is not None and not self.away_task.done():
             logger.info("[turn] пользователь ушёл в away: оклики уже идут, повтор пропущен")
@@ -202,6 +198,7 @@ class CallTurnController:
         Returns:
             None.
         """
+        self._silence_deferred = False
         self._cancel_listen_away_wait()
         task = self.away_task
         self.away_task = None
@@ -217,15 +214,16 @@ class CallTurnController:
             task.cancel()
 
     def on_agent_listening(self) -> None:
-        """Бот перешёл в ожидание ответа: при уже ``away`` — отсчёт молчания.
+        """Бот перешёл в ожидание ответа: при отметке молчания — отсчёт.
 
         LiveKit не перевыставляет ``away``, если клиент уже away. Поэтому
-        после конца речи бота сами ждём ``silence_timeout`` и запускаем оклики.
+        после проигнорированного away сами ждём ``silence_timeout`` с
+        момента listening и запускаем оклики.
 
         Returns:
             None.
         """
-        if self._user_state() != "away":
+        if not self._silence_deferred:
             return
         if self.away_task is not None and not self.away_task.done():
             return
@@ -239,7 +237,7 @@ class CallTurnController:
             return
 
         logger.info(
-            "[turn] бот слушает, клиент уже away: отсчёт тишины %.1fс",
+            "[turn] бот слушает, отложенная отметка молчания: отсчёт тишины %.1fс",
             self._settings.silence_timeout,
         )
         self._listen_away_task = loop.create_task(
@@ -277,8 +275,10 @@ class CallTurnController:
 
         if self._agent_state() != "listening":
             return
-        if self._user_state() != "away":
+        if not self._silence_deferred:
             return
+
+        logger.info("[turn] тишина: оклик по отложенной отметке")
         self.on_user_away()
 
     def _schedule_finished(self) -> None:
