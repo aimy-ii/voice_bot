@@ -42,6 +42,8 @@ def _fake_session() -> MagicMock:
     # set_turn_kind читает _config
     session.llm._config = session.llm.config  # type: ignore[attr-defined]
     session.on = MagicMock(return_value=lambda fn: fn)
+    session.agent_state = "listening"
+    session.user_state = "listening"
     return session
 
 
@@ -211,8 +213,58 @@ async def test_max_continuations_stops_monologue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_away_while_thinking_does_not_start_silence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Away при thinking — оклик не запускается, счётчик не меняется."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=10.0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    session.agent_state = "thinking"
+    controller.silence_attempts = 0
+
+    with caplog.at_level(logging.INFO, logger="voice_bot"):
+        controller.on_user_away()
+
+    assert controller.away_task is None
+    assert controller.silence_attempts == 0
+    session.generate_reply.assert_not_called()
+    assert any(
+        "away проигнорирован" in r.message and "thinking" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_away_while_speaking_does_not_start_silence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Away при speaking — оклик не запускается, счётчик не меняется."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=10.0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    session.agent_state = "speaking"
+    controller.silence_attempts = 1
+
+    with caplog.at_level(logging.INFO, logger="voice_bot"):
+        controller.on_user_away()
+
+    assert controller.away_task is None
+    assert controller.silence_attempts == 1
+    session.generate_reply.assert_not_called()
+    assert any(
+        "away проигнорирован" in r.message and "speaking" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_away_starts_silence_turn() -> None:
-    """Away → generate_reply с turn_kind=silence; say не вызывается."""
+    """Away при listening → generate_reply с turn_kind=silence; say не вызывается."""
     settings = _settings(
         VOICE_BOT_SILENCE_TIMEOUT=10.0,
         VOICE_BOT_SILENCE_ATTEMPTS=2,
@@ -220,6 +272,7 @@ async def test_away_starts_silence_turn() -> None:
     )
     controller = _controller(settings=settings)
     session = controller._session
+    session.agent_state = "listening"
 
     seen: list[str] = []
 
@@ -240,6 +293,45 @@ async def test_away_starts_silence_turn() -> None:
     assert session.generate_reply.await_count == 1
     assert seen == ["silence"]
     session.say.assert_not_called()
+
+    controller.on_user_present()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_silence_after_bot_spoke_while_user_was_away() -> None:
+    """Человек молчал во время речи бота → после listening оклик срабатывает."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="пока",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+
+    session.agent_state = "speaking"
+    session.user_state = "away"
+    controller.on_user_away()
+    assert controller.away_task is None
+    assert controller.silence_attempts == 0
+    session.generate_reply.assert_not_called()
+
+    session.agent_state = "listening"
+    controller.on_agent_listening()
+    wait_task = controller._listen_away_task
+    assert wait_task is not None
+    await wait_task
+
+    task = controller.away_task
+    assert task is not None
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if session.generate_reply.await_count >= 1:
+            break
+
+    assert session.generate_reply.await_count >= 1
+    assert controller.silence_attempts >= 1
 
     controller.on_user_present()
     await asyncio.gather(task, return_exceptions=True)

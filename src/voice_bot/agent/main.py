@@ -85,8 +85,10 @@ def _rtc_session_agent_name(*, auto_accept: bool, agent_name: str) -> str:
 class CallTurnController:
     """Продолжение собственной речи бота и оклики при ``user_state=away``.
 
-    Тишину детектит LiveKit (``user_away_timeout``); здесь только реакция
-    на события и чтение флага продолжения у мозга.
+    Тишину детектит LiveKit (``user_away_timeout``): таймер идёт, пока оба
+    в ``listening``. Оклик запускаем только когда бот слушает; если away
+    пришёл во время thinking/speaking — игнорируем и при возврате бота
+    в listening ждём ``silence_timeout``, затем стартуем оклики.
     """
 
     def __init__(
@@ -116,6 +118,7 @@ class CallTurnController:
         self.continuation_count: int = 0
         self.silence_attempts: int = 0
         self.away_task: asyncio.Task[None] | None = None
+        self._listen_away_task: asyncio.Task[None] | None = None
         self._finished_tasks: set[asyncio.Task[None]] = set()
 
     def attach(self) -> None:
@@ -126,6 +129,10 @@ class CallTurnController:
             if ev.old_state == "speaking":
                 logger.info("[turn] бот договорил: agent_state_changed speaking→%s", ev.new_state)
                 self._schedule_finished()
+            if ev.new_state == "listening":
+                self.on_agent_listening()
+            else:
+                self._cancel_listen_away_wait()
 
         @self._session.on("user_state_changed")
         def _on_user(ev: UserStateChangedEvent) -> None:
@@ -140,12 +147,42 @@ class CallTurnController:
             self._settings.max_continuations,
         )
 
+    def _agent_state(self) -> str:
+        """Текущее состояние агента сессии (для тестов — атрибут заглушки).
+
+        Returns:
+            Строка состояния; при отсутствии атрибута — ``listening``.
+        """
+        state = getattr(self._session, "agent_state", "listening")
+        return state if isinstance(state, str) else "listening"
+
+    def _user_state(self) -> str:
+        """Текущее состояние клиента сессии (для тестов — атрибут заглушки).
+
+        Returns:
+            Строка состояния; при отсутствии атрибута — ``listening``.
+        """
+        state = getattr(self._session, "user_state", "listening")
+        return state if isinstance(state, str) else "listening"
+
     def on_user_away(self) -> None:
-        """Клиент пропал (``away``): запустить оклики, если задача ещё не идёт.
+        """Клиент пропал (``away``): запустить оклики, если бот слушает.
+
+        Пока бот думает или говорит, тишины нет: событие игнорируется без
+        запуска задачи и без изменения счётчика попыток.
 
         Returns:
             None.
         """
+        agent_state = self._agent_state()
+        if agent_state != "listening":
+            logger.info(
+                "[turn] away проигнорирован: бот не слушает (agent_state=%s)",
+                agent_state,
+            )
+            return
+
+        self._cancel_listen_away_wait()
         if self.away_task is not None and not self.away_task.done():
             logger.info("[turn] пользователь ушёл в away: оклики уже идут, повтор пропущен")
             return
@@ -165,6 +202,7 @@ class CallTurnController:
         Returns:
             None.
         """
+        self._cancel_listen_away_wait()
         task = self.away_task
         self.away_task = None
         self.silence_attempts = 0
@@ -177,6 +215,71 @@ class CallTurnController:
             current = None
         if task is not current:
             task.cancel()
+
+    def on_agent_listening(self) -> None:
+        """Бот перешёл в ожидание ответа: при уже ``away`` — отсчёт молчания.
+
+        LiveKit не перевыставляет ``away``, если клиент уже away. Поэтому
+        после конца речи бота сами ждём ``silence_timeout`` и запускаем оклики.
+
+        Returns:
+            None.
+        """
+        if self._user_state() != "away":
+            return
+        if self.away_task is not None and not self.away_task.done():
+            return
+        if self._listen_away_task is not None and not self._listen_away_task.done():
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("Нет event loop для отсчёта тишины после речи бота")
+            return
+
+        logger.info(
+            "[turn] бот слушает, клиент уже away: отсчёт тишины %.1fс",
+            self._settings.silence_timeout,
+        )
+        self._listen_away_task = loop.create_task(
+            self._away_after_listen_timeout(),
+            name="listen-away-wait",
+        )
+
+    def _cancel_listen_away_wait(self) -> None:
+        """Отменить отложенный старт окликов после перехода в listening.
+
+        Returns:
+            None.
+        """
+        task = self._listen_away_task
+        self._listen_away_task = None
+        if task is None or task.done():
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current:
+            task.cancel()
+
+    async def _away_after_listen_timeout(self) -> None:
+        """После ``silence_timeout`` с момента listening запустить оклики.
+
+        Returns:
+            None.
+        """
+        try:
+            await asyncio.sleep(self._settings.silence_timeout)
+        except asyncio.CancelledError:
+            return
+
+        if self._agent_state() != "listening":
+            return
+        if self._user_state() != "away":
+            return
+        self.on_user_away()
 
     def _schedule_finished(self) -> None:
         """Поставить обработку «бот договорил» в фон.
