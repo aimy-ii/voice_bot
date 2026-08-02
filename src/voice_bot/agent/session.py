@@ -130,6 +130,34 @@ def build_agent_langgraph_client(*, settings: Settings) -> LangGraphClient:
     return LangGraphClient(http_client)
 
 
+def build_live_langgraph_client(*, settings: Settings) -> LangGraphClient:
+    """Собрать LangGraph-клиент к служебному графу лайв-канала.
+
+    Тот же способ, что у ``build_agent_langgraph_client``, но по адресу и
+    таймауту живого режима: фоновый агент прощания пишет свежее решение в
+    состояние лайв-треда, и читать его надо оттуда же, куда бот шлёт
+    реплики. ``trust_env=False``: SOCKS5 из окружения воркера не должен
+    перехватывать локальный трафик к мозгу на том же хосте.
+
+    Args:
+        settings: настройки с URL и таймаутом лайв-канала.
+
+    Returns:
+        Готовый ``LangGraphClient`` для чтения состояния лайв-треда.
+    """
+    http_client = httpx.AsyncClient(
+        base_url=settings.agent_partial_url,
+        timeout=httpx.Timeout(
+            connect=5.0,
+            read=settings.agent_partial_timeout,
+            write=settings.agent_partial_timeout,
+            pool=5.0,
+        ),
+        trust_env=False,
+    )
+    return LangGraphClient(http_client)
+
+
 #: Сколько ждём ответа мозга о продолжении. Дольше ждать бессмысленно:
 #: пауза в разговоре дороже пропущенного продолжения.
 CONTINUATION_READ_TIMEOUT = 1.5
@@ -243,6 +271,82 @@ async def is_conversation_ended(client: LangGraphClient, thread_id: str) -> bool
         "[turn] is_conversation_ended: flag=%s (thread_id=%s)",
         result,
         thread_id,
+    )
+    return result
+
+
+async def live_conversation_ended(
+    client: LangGraphClient,
+    live_thread_id: str,
+) -> bool | None:
+    """Свежее решение фонового агента прощания из состояния лайв-треда.
+
+    Основной тред хранит снимок признака, сделанный на коммите хода. Между
+    коммитом и концом речи бота проходят секунды, и за это время фоновый
+    агент успевает пересмотреть решение — флаг обратимый. Здесь читается то
+    же поле, но из контекста разговора в лайв-треде, куда фоновый канал
+    пишет на каждом прогоне.
+
+    Args:
+        client: клиент LangGraph лайв-канала.
+        live_thread_id: идентификатор лайв-треда звонка.
+
+    Returns:
+        ``True`` или ``False`` — свежее решение фона. ``None`` — прочитать не
+        удалось: треда ещё нет, ошибка, таймаут, нет контекста или ключа.
+        При ``None`` вызывающий обязан падать назад на признак из основного
+        треда, иначе поведение изменится там, где живой режим выключен.
+    """
+    try:
+        state = await asyncio.wait_for(
+            client.threads.get_state(live_thread_id),
+            timeout=CONTINUATION_READ_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.info(
+            "[turn] live_conversation_ended: таймаут чтения (live_thread=%s, timeout=%sс)",
+            live_thread_id,
+            CONTINUATION_READ_TIMEOUT,
+        )
+        return None
+    except Exception as exc:
+        logger.info(
+            "[turn] live_conversation_ended: ошибка чтения (live_thread=%s): %s",
+            live_thread_id,
+            exc,
+        )
+        return None
+
+    values = state.get("values") if isinstance(state, dict) else getattr(state, "values", None)
+    if not isinstance(values, dict):
+        logger.info(
+            "[turn] live_conversation_ended: нет values (live_thread=%s, тип=%s)",
+            live_thread_id,
+            type(values).__name__,
+        )
+        return None
+
+    context = values.get("conversation_context")
+    if not isinstance(context, dict):
+        logger.info(
+            "[turn] live_conversation_ended: нет контекста разговора (live_thread=%s)",
+            live_thread_id,
+        )
+        return None
+
+    flag = context.get("conversation_ended")
+    if flag is None:
+        logger.info(
+            "[turn] live_conversation_ended: ключ отсутствует (live_thread=%s)",
+            live_thread_id,
+        )
+        return None
+
+    result = bool(flag)
+    logger.info(
+        "[turn] live_conversation_ended: flag=%s (live_thread=%s)",
+        result,
+        live_thread_id,
     )
     return result
 

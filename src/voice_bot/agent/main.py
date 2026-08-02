@@ -33,10 +33,13 @@ from livekit.agents import (
 from voice_bot.agent.script_agent import ScriptAgent
 from voice_bot.agent.session import (
     build_agent_langgraph_client,
+    build_live_langgraph_client,
     build_partial_transcript_sender,
     build_session,
     expects_continuation,
     is_conversation_ended,
+    live_conversation_ended,
+    live_thread_id_for_room,
     set_turn_kind,
     thread_id_for_room,
 )
@@ -101,6 +104,8 @@ class CallTurnController:
         settings: Settings,
         thread_id: str | None = None,
         lg_client: object | None = None,
+        live_thread_id: str | None = None,
+        live_client: object | None = None,
     ) -> None:
         """Сохранить зависимости звонка и обнулить счётчики.
 
@@ -110,12 +115,18 @@ class CallTurnController:
             settings: таймаут тишины, лимит попыток и продолжений.
             thread_id: UUID треда основного графа; ``None`` — без продолжений.
             lg_client: клиент LangGraph для чтения флагов продолжения и завершения.
+            live_thread_id: UUID лайв-треда служебного графа; ``None`` — свежий
+                признак завершения не читаем, работаем по основному треду.
+            live_client: клиент LangGraph лайв-канала для чтения свежего
+                признака завершения разговора.
         """
         self._session = session
         self._ctx = ctx
         self._settings = settings
         self._thread_id = thread_id
         self._lg_client = lg_client
+        self._live_thread_id = live_thread_id
+        self._live_client = live_client
 
         self.continuation_count: int = 0
         self.silence_attempts: int = 0
@@ -312,7 +323,8 @@ class CallTurnController:
     async def on_agent_finished_speaking(self) -> None:
         """После реплики бота: завершить звонок или продолжить речь по флагам мозга.
 
-        Сначала читаем ``conversation_ended``: если стоит — закрываем комнату
+        Признак завершения читаем из лайв-треда как самый свежий; при
+        недоступности — из основного треда. Если стоит — закрываем комнату
         без прощальной фразы из настроек (бот уже попрощался сам). Завершение
         приоритетнее продолжения. Иначе читаем ``expect_continuation``.
         Ошибка или таймаут чтения — считаем, что флага нет. Лимит
@@ -323,7 +335,19 @@ class CallTurnController:
         """
         ended = False
         try:
-            if self._lg_client is not None and self._thread_id:
+            # Сначала свежее решение фона из лайв-треда: в основном треде
+            # лежит снимок с коммита хода, он успевает устареть за время речи.
+            fresh: bool | None = None
+            if self._live_client is not None and self._live_thread_id:
+                fresh = await live_conversation_ended(
+                    self._live_client,  # type: ignore[arg-type]
+                    self._live_thread_id,
+                )
+            if fresh is not None:
+                ended = fresh
+            elif self._lg_client is not None and self._thread_id:
+                # Живой режим выключен или лайв-тред недоступен — поведение
+                # прежнее, по признаку из основного треда.
                 ended = await is_conversation_ended(
                     self._lg_client,  # type: ignore[arg-type]
                     self._thread_id,
@@ -515,6 +539,9 @@ def _attach_turn_controller(
 ) -> CallTurnController:
     """Подключить продолжение речи и реакцию на тишину к сессии звонка.
 
+    При включённом живом режиме дополнительно собирается клиент и тред
+    лайв-канала для чтения свежего признака завершения.
+
     Args:
         session: голосовая сессия текущего звонка.
         ctx: контекст задания (завершение комнаты после прощальной фразы).
@@ -526,9 +553,14 @@ def _attach_turn_controller(
     """
     lg_client = None
     thread_id = None
+    live_client = None
+    live_thread_id = None
     if settings.llm_provider == "agent":
         lg_client = build_agent_langgraph_client(settings=settings)
         thread_id = thread_id_for_room(room_name)
+        if settings.agent_partial_enabled and settings.agent_partial_url.strip():
+            live_client = build_live_langgraph_client(settings=settings)
+            live_thread_id = live_thread_id_for_room(room_name)
 
     controller = CallTurnController(
         session=session,
@@ -536,6 +568,8 @@ def _attach_turn_controller(
         settings=settings,
         thread_id=thread_id,
         lg_client=lg_client,
+        live_thread_id=live_thread_id,
+        live_client=live_client,
     )
     controller.attach()
     return controller

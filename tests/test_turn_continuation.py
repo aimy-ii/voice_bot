@@ -53,6 +53,8 @@ def _controller(
     settings: Settings | None = None,
     lg_client: object | None = None,
     thread_id: str | None = "thread-1",
+    live_client: object | None = None,
+    live_thread_id: str | None = None,
 ) -> main_module.CallTurnController:
     """Собрать контроллер с фейковой сессией и нулевым таймаутом тишины."""
     sess = session or _fake_session()
@@ -64,6 +66,8 @@ def _controller(
         settings=cfg,
         thread_id=thread_id,
         lg_client=lg_client,
+        live_thread_id=live_thread_id,
+        live_client=live_client,
     )
 
 
@@ -151,6 +155,236 @@ async def test_is_conversation_ended_false_on_client_error() -> None:
     client.threads.get_state = AsyncMock(side_effect=RuntimeError("boom"))
 
     assert await session_module.is_conversation_ended(client, "tid") is False
+
+
+# --- live_conversation_ended ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_live_conversation_ended_true_when_flag_set() -> None:
+    """Контекст с conversation_ended=True → True, get_state один раз."""
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(
+        return_value={"values": {"conversation_context": {"conversation_ended": True}}}
+    )
+
+    assert await session_module.live_conversation_ended(client, "live-tid") is True
+    client.threads.get_state.assert_awaited_once_with("live-tid")
+
+
+@pytest.mark.asyncio
+async def test_live_conversation_ended_false_when_flag_false() -> None:
+    """Контекст с conversation_ended=False → False (не None)."""
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(
+        return_value={"values": {"conversation_context": {"conversation_ended": False}}}
+    )
+
+    assert await session_module.live_conversation_ended(client, "live-tid") is False
+
+
+@pytest.mark.asyncio
+async def test_live_conversation_ended_none_without_key() -> None:
+    """Нет ключа conversation_ended внутри контекста → None."""
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(
+        return_value={"values": {"conversation_context": {"other": 1}}}
+    )
+
+    assert await session_module.live_conversation_ended(client, "live-tid") is None
+
+
+@pytest.mark.asyncio
+async def test_live_conversation_ended_none_without_context() -> None:
+    """Нет conversation_context в values → None."""
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(return_value={"values": {"messages": []}})
+
+    assert await session_module.live_conversation_ended(client, "live-tid") is None
+
+
+@pytest.mark.asyncio
+async def test_live_conversation_ended_none_when_values_not_dict() -> None:
+    """values не словарь → None."""
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(return_value={"values": "broken"})
+
+    assert await session_module.live_conversation_ended(client, "live-tid") is None
+
+
+@pytest.mark.asyncio
+async def test_live_conversation_ended_none_on_client_error() -> None:
+    """Ошибка клиента → None, исключение наружу не летит."""
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(side_effect=RuntimeError("boom"))
+
+    assert await session_module.live_conversation_ended(client, "live-tid") is None
+
+
+@pytest.mark.asyncio
+async def test_live_conversation_ended_none_on_read_timeout() -> None:
+    """Таймаут чтения → None."""
+
+    async def _slow_get_state(_thread_id: str) -> dict[str, object]:
+        await asyncio.sleep(10)
+        return {"values": {"conversation_context": {"conversation_ended": True}}}
+
+    client = MagicMock()
+    client.threads.get_state = AsyncMock(side_effect=_slow_get_state)
+
+    with patch.object(session_module, "CONTINUATION_READ_TIMEOUT", 0.05):
+        assert await session_module.live_conversation_ended(client, "live-tid") is None
+
+
+# --- приоритет лайв-признака завершения -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_finished_live_false_overrides_main_true_no_hangup() -> None:
+    """Лайв False, основной True → трубка не кладётся, основной get_state не звался."""
+    live = MagicMock()
+    live.threads.get_state = AsyncMock(
+        return_value={"values": {"conversation_context": {"conversation_ended": False}}}
+    )
+    main = MagicMock()
+    main.threads.get_state = AsyncMock(return_value={"values": {"conversation_ended": True}})
+    controller = _controller(
+        lg_client=main,
+        thread_id="main-tid",
+        live_client=live,
+        live_thread_id="live-tid",
+    )
+    ctx = controller._ctx
+
+    with patch.object(main_module, "expects_continuation", AsyncMock(return_value=False)):
+        await controller.on_agent_finished_speaking()
+
+    ctx.delete_room.assert_not_called()
+    main.threads.get_state.assert_not_called()
+    live.threads.get_state.assert_awaited_once_with("live-tid")
+
+
+@pytest.mark.asyncio
+async def test_finished_live_true_hangs_up_despite_main_false() -> None:
+    """Лайв True, основной False → трубка кладётся."""
+    live = MagicMock()
+    live.threads.get_state = AsyncMock(
+        return_value={"values": {"conversation_context": {"conversation_ended": True}}}
+    )
+    main = MagicMock()
+    main.threads.get_state = AsyncMock(return_value={"values": {"conversation_ended": False}})
+    controller = _controller(
+        lg_client=main,
+        thread_id="main-tid",
+        live_client=live,
+        live_thread_id="live-tid",
+    )
+    ctx = controller._ctx
+
+    await controller.on_agent_finished_speaking()
+
+    ctx.delete_room.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_finished_live_none_falls_back_to_main_true() -> None:
+    """Лайв None (ошибка), основной True → падаем назад, трубка кладётся."""
+    live = MagicMock()
+    live.threads.get_state = AsyncMock(side_effect=RuntimeError("boom"))
+    main = MagicMock()
+    main.threads.get_state = AsyncMock(return_value={"values": {"conversation_ended": True}})
+    controller = _controller(
+        lg_client=main,
+        thread_id="main-tid",
+        live_client=live,
+        live_thread_id="live-tid",
+    )
+    ctx = controller._ctx
+
+    await controller.on_agent_finished_speaking()
+
+    ctx.delete_room.assert_called_once_with()
+    main.threads.get_state.assert_awaited_once_with("main-tid")
+
+
+@pytest.mark.asyncio
+async def test_finished_without_live_client_reads_main_thread() -> None:
+    """Без лайв-клиента — поведение прежнее: читается основной тред."""
+    main = MagicMock()
+    main.threads.get_state = AsyncMock(return_value={"values": {"conversation_ended": True}})
+    controller = _controller(
+        lg_client=main,
+        thread_id="main-tid",
+        live_client=None,
+        live_thread_id=None,
+    )
+    ctx = controller._ctx
+
+    await controller.on_agent_finished_speaking()
+
+    ctx.delete_room.assert_called_once_with()
+    main.threads.get_state.assert_awaited_once_with("main-tid")
+
+
+# --- сборка контроллера с лайв-каналом ------------------------------------
+
+
+def test_attach_turn_controller_builds_live_when_partial_enabled() -> None:
+    """При agent + partial собираются непустые live_client и live_thread_id."""
+    settings = _settings(
+        VOICE_BOT_LLM_PROVIDER="agent",
+        VOICE_BOT_AGENT_URL="http://agent.test:8127",
+        VOICE_BOT_AGENT_PARTIAL_ENABLED="true",
+        VOICE_BOT_AGENT_PARTIAL_URL="http://partial.test:8127",
+        VOICE_BOT_AGENT_PARTIAL_GRAPH="vector_checker",
+    )
+    session = _fake_session()
+    ctx = SimpleNamespace(delete_room=MagicMock())
+
+    with (
+        patch.object(main_module, "build_agent_langgraph_client", return_value=MagicMock()),
+        patch.object(
+            main_module, "build_live_langgraph_client", return_value=MagicMock()
+        ) as live_b,
+    ):
+        controller = main_module._attach_turn_controller(
+            session,
+            ctx=ctx,  # type: ignore[arg-type]
+            settings=settings,
+            room_name="voice_assistant_room_1",
+        )
+
+    live_b.assert_called_once_with(settings=settings)
+    assert controller._live_client is not None
+    assert controller._live_thread_id is not None
+    assert controller._thread_id is not None
+    assert controller._live_thread_id != controller._thread_id
+
+
+def test_attach_turn_controller_skips_live_when_partial_disabled() -> None:
+    """При partial=false live_client и live_thread_id остаются None."""
+    settings = _settings(
+        VOICE_BOT_LLM_PROVIDER="agent",
+        VOICE_BOT_AGENT_URL="http://agent.test:8127",
+        VOICE_BOT_AGENT_PARTIAL_ENABLED="false",
+    )
+    session = _fake_session()
+    ctx = SimpleNamespace(delete_room=MagicMock())
+
+    with (
+        patch.object(main_module, "build_agent_langgraph_client", return_value=MagicMock()),
+        patch.object(main_module, "build_live_langgraph_client") as live_b,
+    ):
+        controller = main_module._attach_turn_controller(
+            session,
+            ctx=ctx,  # type: ignore[arg-type]
+            settings=settings,
+            room_name="voice_assistant_room_1",
+        )
+
+    live_b.assert_not_called()
+    assert controller._live_client is None
+    assert controller._live_thread_id is None
 
 
 # --- продолжение после реплики бота --------------------------------------
