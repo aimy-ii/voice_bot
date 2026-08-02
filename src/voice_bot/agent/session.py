@@ -35,6 +35,7 @@ from livekit.agents import (
 )
 from livekit.agents import llm as llm_module
 from livekit.agents import stt as stt_module
+from livekit.agents import tts as tts_module
 from livekit.plugins import elevenlabs, langchain, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -759,6 +760,48 @@ def _build_llm(
     return openai.LLM(**llm_kwargs)
 
 
+def _build_tts(
+    *,
+    settings: Settings,
+    elevenlabs_kwargs: dict[str, object],
+    openai_client: openai_sdk.AsyncClient | None,
+) -> tts_module.TTS:
+    """Выбрать провайдера синтеза речи по настройкам.
+
+    ``elevenlabs`` — записанный голос компании по вебсокету, поведение по
+    умолчанию. ``openai`` — запасной провайдер на ключе OpenAI: отдельная
+    оплата не нужна, но плагин объявляет ``streaming=False``, поэтому LiveKit
+    сам обернёт его в ``tts.StreamAdapter`` и будет синтезировать по
+    предложениям — первая порция звука появится позже, чем у ElevenLabs.
+
+    Args:
+        settings: настройки приложения (провайдер, модель, голос, темп).
+        elevenlabs_kwargs: готовые параметры плагина ElevenLabs, включая
+            ``http_session`` с прокси, если он задан.
+        openai_client: общий клиент OpenAI с прокси-транспортом; ``None``,
+            когда прокси не сконфигурирован — тогда ключ передаётся напрямую.
+
+    Returns:
+        Готовый плагин TTS для ``AgentSession``.
+    """
+    if settings.tts_provider == "openai":
+        openai_kwargs: dict[str, object] = {
+            "model": settings.openai_tts_model,
+            "voice": settings.openai_tts_voice,
+            "speed": settings.openai_tts_speed,
+        }
+        instructions = settings.openai_tts_instructions.strip()
+        if instructions:
+            openai_kwargs["instructions"] = instructions
+        if openai_client is not None:
+            # Тот же клиент, что у STT и LLM: второй прокси-обвязки не нужно.
+            openai_kwargs["client"] = openai_client
+        else:
+            openai_kwargs["api_key"] = settings.openai_api_key
+        return openai.TTS(**openai_kwargs)
+    return elevenlabs.TTS(**elevenlabs_kwargs)
+
+
 def build_session(settings: Settings, *, room_name: str | None = None) -> AgentSession:
     """Создать :class:`AgentSession` с провайдерами из настроек.
 
@@ -768,8 +811,9 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
 
     Если задан прокси, внешний трафик OpenAI (``proxy_url`` / httpx) и
     ElevenLabs (``proxy_fields`` / aiohttp_socks) идёт через SOCKS5;
-    иначе клиенты работают напрямую. Трафик к агентскому графу в прокси
-    не заворачивается.
+    иначе клиенты работают напрямую. При ``tts_provider=openai`` синтез
+    идёт через тот же клиент OpenAI, а aiohttp-сессия ElevenLabs не
+    создаётся. Трафик к агентскому графу в прокси не заворачивается.
 
     Args:
         settings: настройки приложения (модели, язык, идентификатор голоса, ключи).
@@ -789,7 +833,7 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         "model": settings.llm_model,
         "api_key": settings.openai_api_key,
     }
-    tts_kwargs: dict[str, object] = {
+    elevenlabs_kwargs: dict[str, object] = {
         "voice_id": settings.elevenlabs_voice_id,
         "model": settings.tts_model,
         "api_key": settings.elevenlabs_api_key,
@@ -802,6 +846,7 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         ),
     }
 
+    openai_client: openai_sdk.AsyncClient | None = None
     proxy_url = settings.proxy_url
     proxy_fields = settings.proxy_fields
     if proxy_url is not None and proxy_fields is not None:
@@ -811,7 +856,10 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         )
         stt_kwargs["client"] = openai_client
         llm_kwargs["client"] = openai_client
-        tts_kwargs["http_session"] = _build_elevenlabs_session(proxy_fields=proxy_fields)
+        # Отдельная aiohttp-сессия нужна только ElevenLabs: OpenAI ходит
+        # через тот же httpx-клиент, что STT и LLM.
+        if settings.tts_provider == "elevenlabs":
+            elevenlabs_kwargs["http_session"] = _build_elevenlabs_session(proxy_fields=proxy_fields)
 
     # VAD один на сессию: его же переиспользует StreamAdapter сервиса
     # распознавания, чтобы не держать в памяти вторую копию модели Silero.
@@ -822,8 +870,12 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         stt=_build_stt(settings=settings, stt_kwargs=stt_kwargs, vad=vad),
         # «Мозг»: OpenAI или удалённый граф — переключатель в настройках.
         llm=_build_llm(settings=settings, llm_kwargs=llm_kwargs, room_name=room_name),
-        # Текст → голос. voice_id — тот самый записанный голос компании.
-        tts=elevenlabs.TTS(**tts_kwargs),
+        # Текст → голос. Провайдер переключается в настройках, без правок кода.
+        tts=_build_tts(
+            settings=settings,
+            elevenlabs_kwargs=elevenlabs_kwargs,
+            openai_client=openai_client,
+        ),
         # Слышит границы речи (начал/закончил говорить).
         vad=vad,
         # Определяет, что реплика клиента завершена (мультиязычная модель).

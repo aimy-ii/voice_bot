@@ -37,8 +37,10 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(alias="OPENAI_API_KEY")
 
     # --- ElevenLabs: синтез голоса (TTS) ---
-    elevenlabs_api_key: str = Field(alias="ELEVENLABS_API_KEY")
-    elevenlabs_voice_id: str = Field(alias="ELEVENLABS_VOICE_ID")
+    # Обязательны только при tts_provider="elevenlabs" — проверка в валидаторе
+    # ниже. При провайдере "openai" ключ и голос ElevenLabs не нужны вовсе.
+    elevenlabs_api_key: str = Field(default="", alias="ELEVENLABS_API_KEY")
+    elevenlabs_voice_id: str = Field(default="", alias="ELEVENLABS_VOICE_ID")
     # multilingual_v2 — стабильнее по тону на клонированном голосе, чем flash.
     tts_model: str = Field(default="eleven_multilingual_v2", alias="ELEVENLABS_MODEL")
     # Ровный деловой тон: высокая стабильность, без лишней экспрессии.
@@ -80,6 +82,24 @@ class Settings(BaseSettings):
     agent_graph: str = Field(default="vector_agent", alias="VOICE_BOT_AGENT_GRAPH")
     # Таймаут HTTP до графа, секунды (стриминговое соединение на весь ход).
     agent_timeout: float = Field(default=30.0, alias="VOICE_BOT_AGENT_TIMEOUT")
+
+    # --- Синтез речи: ElevenLabs или OpenAI ---
+    # "elevenlabs" — как было, записанный голос компании (поведение по умолчанию).
+    # "openai" — запасной провайдер на том же ключе OPENAI_API_KEY: отдельная
+    # оплата и отдельный ключ не нужны, но голос другой и синтез нестриминговый.
+    tts_provider: Literal["elevenlabs", "openai"] = Field(
+        default="elevenlabs", alias="VOICE_BOT_TTS_PROVIDER"
+    )
+    # Модель синтеза OpenAI. gpt-4o-mini-tts принимает инструкции по тону;
+    # tts-1 и tts-1-hd их игнорируют.
+    openai_tts_model: str = Field(default="gpt-4o-mini-tts", alias="OPENAI_TTS_MODEL")
+    # Голос из закрытого списка OpenAI: alloy, ash, ballad, coral, echo, fable,
+    # onyx, nova, sage, shimmer. Женские по звучанию — shimmer, nova, coral, sage.
+    openai_tts_voice: str = Field(default="shimmer", alias="OPENAI_TTS_VOICE")
+    # Тон и манера речи словами (только gpt-4o-mini-tts). Пусто — не передаём.
+    openai_tts_instructions: str = Field(default="", alias="OPENAI_TTS_INSTRUCTIONS")
+    # Скорость речи, допустимый диапазон 0.25–4.0. Единица — как в модели.
+    openai_tts_speed: float = Field(default=1.0, alias="OPENAI_TTS_SPEED")
 
     # --- Живой режим: предподготовка по промежуточному STT (vector_checker) ---
     # Выключено по умолчанию (безопасно). На стенде — окружением:
@@ -139,22 +159,36 @@ class Settings(BaseSettings):
 
         Raises:
             ValueError: если обязательный секрет/URL пуст; если при
-                ``llm_provider=agent`` / ``stt_provider=service`` не заданы
-                адреса; если живой режим включён без URL/имени графа.
+                ``tts_provider=elevenlabs`` не заданы ключ и идентификатор
+                голоса; если при ``llm_provider=agent`` /
+                ``stt_provider=service`` не заданы адреса; если живой режим
+                включён без URL/имени графа.
         """
         required_non_empty: tuple[tuple[str, str], ...] = (
             ("LIVEKIT_URL", self.livekit_url),
             ("LIVEKIT_API_KEY", self.livekit_api_key),
             ("LIVEKIT_API_SECRET", self.livekit_api_secret),
             ("OPENAI_API_KEY", self.openai_api_key),
-            ("ELEVENLABS_API_KEY", self.elevenlabs_api_key),
-            ("ELEVENLABS_VOICE_ID", self.elevenlabs_voice_id),
         )
         for env_name, value in required_non_empty:
             if not value.strip():
                 raise ValueError(
                     f"{env_name} обязателен: пустое значение недопустимо "
                     "(задайте в окружении или .env)"
+                )
+
+        if self.tts_provider == "elevenlabs":
+            if not self.elevenlabs_api_key.strip():
+                raise ValueError(
+                    "ELEVENLABS_API_KEY обязателен при VOICE_BOT_TTS_PROVIDER=elevenlabs: "
+                    "без ключа нельзя синтезировать голос "
+                    "(или переключитесь на VOICE_BOT_TTS_PROVIDER=openai)"
+                )
+            if not self.elevenlabs_voice_id.strip():
+                raise ValueError(
+                    "ELEVENLABS_VOICE_ID обязателен при VOICE_BOT_TTS_PROVIDER=elevenlabs: "
+                    "без идентификатора голоса нельзя синтезировать речь "
+                    "(или переключитесь на VOICE_BOT_TTS_PROVIDER=openai)"
                 )
 
         if self.llm_provider == "agent":

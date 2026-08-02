@@ -402,3 +402,88 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert (
         settings.silence_goodbye == "Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить."
     )
+
+
+def test_tts_provider_defaults_to_elevenlabs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без VOICE_BOT_TTS_PROVIDER — elevenlabs (старое поведение по умолчанию)."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("VOICE_BOT_TTS_PROVIDER", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.tts_provider == "elevenlabs"
+
+
+def test_tts_provider_rejects_invalid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Недопустимое значение VOICE_BOT_TTS_PROVIDER роняет валидацию."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "yandex")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_tts_provider_openai_allows_empty_elevenlabs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При openai пустые/отсутствующие ключи ElevenLabs не роняют настройки."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "openai")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.tts_provider == "openai"
+
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_VOICE_ID", raising=False)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.tts_provider == "openai"
+    assert settings.elevenlabs_api_key == ""
+    assert settings.elevenlabs_voice_id == ""
+
+
+def test_tts_provider_elevenlabs_requires_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При elevenlabs пустой ELEVENLABS_API_KEY — ошибка с именем переменной."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "")
+
+    with pytest.raises(ValidationError, match="ELEVENLABS_API_KEY"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_tts_provider_elevenlabs_requires_voice_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При elevenlabs пустой ELEVENLABS_VOICE_ID — ошибка с именем переменной."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "")
+
+    with pytest.raises(ValidationError, match="ELEVENLABS_VOICE_ID"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_openai_tts_field_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Дефолты полей синтеза OpenAI без переменных окружения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("OPENAI_TTS_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_TTS_VOICE", raising=False)
+    monkeypatch.delenv("OPENAI_TTS_INSTRUCTIONS", raising=False)
+    monkeypatch.delenv("OPENAI_TTS_SPEED", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.openai_tts_model == "gpt-4o-mini-tts"
+    assert settings.openai_tts_voice == "shimmer"
+    assert settings.openai_tts_instructions == ""
+    assert settings.openai_tts_speed == 1.0
