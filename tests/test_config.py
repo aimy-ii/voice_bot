@@ -90,6 +90,7 @@ def test_proxy_url_none_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_url_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """При всех PROXY_* собирается socks5h://user:pass@host:port."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "user")
@@ -103,6 +104,7 @@ def test_proxy_url_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_url_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без user/pass собирается socks5h://host:port."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "")
@@ -126,6 +128,7 @@ def test_proxy_fields_none_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_fields_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """При всех PROXY_* — host/port/rdns и username/password."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "user")
@@ -145,6 +148,7 @@ def test_proxy_fields_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_fields_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без user/pass — только host/port/rdns."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "")
@@ -157,6 +161,69 @@ def test_proxy_fields_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
         "port": 1080,
         "rdns": True,
     }
+
+
+def test_proxy_disabled_by_is_proxy_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """При IS_PROXY=false заполненные PROXY_* игнорируются."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "false")
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
+
+
+def test_proxy_disabled_when_is_proxy_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без IS_PROXY дефолт false — заполненные PROXY_* тоже игнорируются."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("IS_PROXY", raising=False)
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.is_proxy is False
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
+
+
+def test_proxy_empty_port_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пустая строка в PROXY_PORT не роняет старт и даёт None в свойствах."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.proxy_port is None
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
+
+
+def test_proxy_whitespace_port_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Строка из пробелов в PROXY_PORT ведёт себя как пустая."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "  ")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.proxy_port is None
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
 
 
 def test_background_audio_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,3 +451,106 @@ def test_agent_url_required_when_provider_agent(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(ValidationError, match="VOICE_BOT_AGENT_URL"):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Дефолты тишины и лимита продолжений без переменных окружения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_TIMEOUT", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_GOODBYE", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_ATTEMPTS", raising=False)
+    monkeypatch.delenv("VOICE_BOT_MAX_CONTINUATIONS", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.silence_timeout == 6.0
+    assert settings.max_continuations == 3
+    assert settings.silence_attempts == 2
+    assert (
+        settings.silence_goodbye == "Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить."
+    )
+
+
+def test_tts_provider_defaults_to_elevenlabs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без VOICE_BOT_TTS_PROVIDER — elevenlabs (старое поведение по умолчанию)."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("VOICE_BOT_TTS_PROVIDER", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.tts_provider == "elevenlabs"
+
+
+def test_tts_provider_rejects_invalid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Недопустимое значение VOICE_BOT_TTS_PROVIDER роняет валидацию."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "yandex")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_tts_provider_openai_allows_empty_elevenlabs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При openai пустые/отсутствующие ключи ElevenLabs не роняют настройки."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "openai")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.tts_provider == "openai"
+
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.delenv("ELEVENLABS_VOICE_ID", raising=False)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.tts_provider == "openai"
+    assert settings.elevenlabs_api_key == ""
+    assert settings.elevenlabs_voice_id == ""
+
+
+def test_tts_provider_elevenlabs_requires_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При elevenlabs пустой ELEVENLABS_API_KEY — ошибка с именем переменной."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "")
+
+    with pytest.raises(ValidationError, match="ELEVENLABS_API_KEY"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_tts_provider_elevenlabs_requires_voice_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При elevenlabs пустой ELEVENLABS_VOICE_ID — ошибка с именем переменной."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "")
+
+    with pytest.raises(ValidationError, match="ELEVENLABS_VOICE_ID"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_openai_tts_field_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Дефолты полей синтеза OpenAI без переменных окружения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("OPENAI_TTS_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_TTS_VOICE", raising=False)
+    monkeypatch.delenv("OPENAI_TTS_INSTRUCTIONS", raising=False)
+    monkeypatch.delenv("OPENAI_TTS_SPEED", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.openai_tts_model == "gpt-4o-mini-tts"
+    assert settings.openai_tts_voice == "shimmer"
+    assert settings.openai_tts_instructions == ""
+    assert settings.openai_tts_speed == 1.0

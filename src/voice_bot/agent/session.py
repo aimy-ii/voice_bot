@@ -35,6 +35,7 @@ from livekit.agents import (
 )
 from livekit.agents import llm as llm_module
 from livekit.agents import stt as stt_module
+from livekit.agents import tts as tts_module
 from livekit.plugins import elevenlabs, langchain, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -104,6 +105,307 @@ def live_thread_id_for_room(room_name: str) -> str:
     return str(uuid.uuid5(_ROOM_THREAD_NAMESPACE, f"{room_name}#live"))
 
 
+def build_agent_langgraph_client(*, settings: Settings) -> LangGraphClient:
+    """Собрать LangGraph-клиент к основному графу с ``trust_env=False``.
+
+    Тот же способ, что у ``_build_agent_llm``: SOCKS5 из окружения воркера
+    не должен перехватывать локальный трафик к мозгу на том же хосте.
+
+    Args:
+        settings: настройки с URL и таймаутом основного графа.
+
+    Returns:
+        Готовый ``LangGraphClient`` (например, для чтения state треда).
+    """
+    http_client = httpx.AsyncClient(
+        base_url=settings.agent_url,
+        timeout=httpx.Timeout(
+            connect=5.0,
+            read=settings.agent_timeout,
+            write=settings.agent_timeout,
+            pool=5.0,
+        ),
+        trust_env=False,
+    )
+    return LangGraphClient(http_client)
+
+
+def build_live_langgraph_client(*, settings: Settings) -> LangGraphClient:
+    """Собрать LangGraph-клиент к служебному графу лайв-канала.
+
+    Тот же способ, что у ``build_agent_langgraph_client``, но по адресу и
+    таймауту живого режима: фоновый агент прощания пишет свежее решение в
+    состояние лайв-треда, и читать его надо оттуда же, куда бот шлёт
+    реплики. ``trust_env=False``: SOCKS5 из окружения воркера не должен
+    перехватывать локальный трафик к мозгу на том же хосте.
+
+    Args:
+        settings: настройки с URL и таймаутом лайв-канала.
+
+    Returns:
+        Готовый ``LangGraphClient`` для чтения состояния лайв-треда.
+    """
+    http_client = httpx.AsyncClient(
+        base_url=settings.agent_partial_url,
+        timeout=httpx.Timeout(
+            connect=5.0,
+            read=settings.agent_partial_timeout,
+            write=settings.agent_partial_timeout,
+            pool=5.0,
+        ),
+        trust_env=False,
+    )
+    return LangGraphClient(http_client)
+
+
+#: Сколько ждём ответа мозга о продолжении. Дольше ждать бессмысленно:
+#: пауза в разговоре дороже пропущенного продолжения.
+CONTINUATION_READ_TIMEOUT = 1.5
+
+
+async def expects_continuation(client: LangGraphClient, thread_id: str) -> bool:
+    """Обещал ли мозг продолжить реплику на следующем ходу.
+
+    Args:
+        client: клиент LangGraph, тот же, что и для основного графа.
+        thread_id: идентификатор треда звонка.
+
+    Returns:
+        True — надо запустить следующий ход без реплики клиента.
+        Любая ошибка или таймаут чтения — False: молчание безопаснее лишнего хода.
+    """
+    try:
+        state = await asyncio.wait_for(
+            client.threads.get_state(thread_id),
+            timeout=CONTINUATION_READ_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.info(
+            "[turn] expects_continuation: таймаут чтения (thread_id=%s, timeout=%sс)",
+            thread_id,
+            CONTINUATION_READ_TIMEOUT,
+        )
+        return False
+    except Exception as exc:
+        logger.info(
+            "[turn] expects_continuation: ошибка чтения (thread_id=%s): %s",
+            thread_id,
+            exc,
+        )
+        return False
+
+    values = state.get("values") if isinstance(state, dict) else getattr(state, "values", None)
+    if not isinstance(values, dict):
+        logger.info(
+            "[turn] expects_continuation: flag=False (thread_id=%s, values=%s)",
+            thread_id,
+            type(values).__name__,
+        )
+        return False
+
+    flag = values.get("expect_continuation")
+    if flag is None:
+        logger.info(
+            "[turn] expects_continuation: flag=False (thread_id=%s, ключ отсутствует)",
+            thread_id,
+        )
+        return False
+    result = bool(flag)
+    logger.info(
+        "[turn] expects_continuation: flag=%s (thread_id=%s)",
+        result,
+        thread_id,
+    )
+    return result
+
+
+async def is_conversation_ended(client: LangGraphClient, thread_id: str) -> bool:
+    """Пометил ли мозг разговор как законченный (прощание после закрытых шагов).
+
+    Args:
+        client: клиент LangGraph, тот же, что и для основного графа.
+        thread_id: идентификатор треда звонка.
+
+    Returns:
+        True — звонок пора завершить без новой реплики.
+        Любая ошибка или таймаут чтения — False: безопаснее не рвать линию.
+    """
+    try:
+        state = await asyncio.wait_for(
+            client.threads.get_state(thread_id),
+            timeout=CONTINUATION_READ_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.info(
+            "[turn] is_conversation_ended: таймаут чтения (thread_id=%s, timeout=%sс)",
+            thread_id,
+            CONTINUATION_READ_TIMEOUT,
+        )
+        return False
+    except Exception as exc:
+        logger.info(
+            "[turn] is_conversation_ended: ошибка чтения (thread_id=%s): %s",
+            thread_id,
+            exc,
+        )
+        return False
+
+    values = state.get("values") if isinstance(state, dict) else getattr(state, "values", None)
+    if not isinstance(values, dict):
+        logger.info(
+            "[turn] is_conversation_ended: flag=False (thread_id=%s, values=%s)",
+            thread_id,
+            type(values).__name__,
+        )
+        return False
+
+    flag = values.get("conversation_ended")
+    if flag is None:
+        logger.info(
+            "[turn] is_conversation_ended: flag=False (thread_id=%s, ключ отсутствует)",
+            thread_id,
+        )
+        return False
+    result = bool(flag)
+    logger.info(
+        "[turn] is_conversation_ended: flag=%s (thread_id=%s)",
+        result,
+        thread_id,
+    )
+    return result
+
+
+async def live_conversation_ended(
+    client: LangGraphClient,
+    live_thread_id: str,
+) -> bool | None:
+    """Свежее решение фонового агента прощания из состояния лайв-треда.
+
+    Основной тред хранит снимок признака, сделанный на коммите хода. Между
+    коммитом и концом речи бота проходят секунды, и за это время фоновый
+    агент успевает пересмотреть решение — флаг обратимый. Здесь читается то
+    же поле, но из контекста разговора в лайв-треде, куда фоновый канал
+    пишет на каждом прогоне.
+
+    Args:
+        client: клиент LangGraph лайв-канала.
+        live_thread_id: идентификатор лайв-треда звонка.
+
+    Returns:
+        ``True`` или ``False`` — свежее решение фона. ``None`` — прочитать не
+        удалось: треда ещё нет, ошибка, таймаут, нет контекста или ключа.
+        При ``None`` вызывающий обязан падать назад на признак из основного
+        треда, иначе поведение изменится там, где живой режим выключен.
+    """
+    try:
+        state = await asyncio.wait_for(
+            client.threads.get_state(live_thread_id),
+            timeout=CONTINUATION_READ_TIMEOUT,
+        )
+    except TimeoutError:
+        logger.info(
+            "[turn] live_conversation_ended: таймаут чтения (live_thread=%s, timeout=%sс)",
+            live_thread_id,
+            CONTINUATION_READ_TIMEOUT,
+        )
+        return None
+    except Exception as exc:
+        logger.info(
+            "[turn] live_conversation_ended: ошибка чтения (live_thread=%s): %s",
+            live_thread_id,
+            exc,
+        )
+        return None
+
+    values = state.get("values") if isinstance(state, dict) else getattr(state, "values", None)
+    if not isinstance(values, dict):
+        logger.info(
+            "[turn] live_conversation_ended: нет values (live_thread=%s, тип=%s)",
+            live_thread_id,
+            type(values).__name__,
+        )
+        return None
+
+    context = values.get("conversation_context")
+    if not isinstance(context, dict):
+        logger.info(
+            "[turn] live_conversation_ended: нет контекста разговора (live_thread=%s)",
+            live_thread_id,
+        )
+        return None
+
+    flag = context.get("conversation_ended")
+    if flag is None:
+        logger.info(
+            "[turn] live_conversation_ended: ключ отсутствует (live_thread=%s)",
+            live_thread_id,
+        )
+        return None
+
+    result = bool(flag)
+    logger.info(
+        "[turn] live_conversation_ended: flag=%s (live_thread=%s)",
+        result,
+        live_thread_id,
+    )
+    return result
+
+
+def set_turn_kind(llm: object, turn_kind: str) -> None:
+    """Записать ``turn_kind`` в ``configurable`` адаптера LLM (рядом с thread_id).
+
+    Args:
+        llm: плагин сессии (ожидается ``LLMAdapter`` с ``_config``).
+        turn_kind: ``client`` для обычного хода, ``continuation`` для
+            продолжения без реплики клиента, ``silence`` — человек молчит.
+    """
+    config = getattr(llm, "_config", None)
+    if not isinstance(config, dict):
+        return
+    configurable = config.setdefault("configurable", {})
+    if not isinstance(configurable, dict):
+        return
+    configurable["turn_kind"] = turn_kind
+
+
+def chat_history_snapshot(session: AgentSession | None) -> list[dict[str, str]]:
+    """Снять снимок реплик диалога из истории сессии.
+
+    Берёт только ``session.history.messages()`` (не ``items``): там лежат
+    реплики, без системных ``AgentConfigUpdate``. Роли ``user``/``assistant``
+    мапятся в ``human``/``ai``; ``system`` и ``developer`` пропускаются.
+    Текст — как в ``text_content`` после ``.strip()`` по краям, без иной
+    нормализации. Пустые сообщения отбрасываются. Обрезки нет.
+
+    Args:
+        session: голосовая сессия или ``None``.
+
+    Returns:
+        Список словарей ``{"type": "human"|"ai", "content": "..."}``
+        в порядке истории; пустой список, если сессии нет или сообщений нет.
+    """
+    if session is None:
+        return []
+
+    snapshot: list[dict[str, str]] = []
+    for msg in session.history.messages():
+        role = getattr(msg, "role", None)
+        if role == "user":
+            msg_type = "human"
+        elif role == "assistant":
+            msg_type = "ai"
+        else:
+            continue
+        text = getattr(msg, "text_content", None)
+        if not isinstance(text, str):
+            continue
+        content = text.strip()
+        if not content:
+            continue
+        snapshot.append({"type": msg_type, "content": content})
+    return snapshot
+
+
 class PartialTranscriptSender:
     """Фоновая отправка накопленного STT на служебный граф ``vector_checker``.
 
@@ -111,7 +413,11 @@ class PartialTranscriptSender:
     и промежуточный, и финальный текст, без вмешательства в конвейер STT.
     Каждый раз уходит **весь** накопленный текст реплики в поле
     ``partial_reply``, не дельта. Вместе с текстом — ``partial_utterance_id``
-    (свой на реплику) и ``partial_is_final``. HTTP ставится через
+    (свой на реплику), ``partial_is_final`` и при наличии — снимок истории
+    диалога в ``messages`` (роли ``human``/``ai``), чтобы судья видел вопрос
+    бота, на который отвечает клиент. Снимок снимается **синхронно** в
+    ``on_transcript`` перед постановкой задачи: иначе фоновая отправка
+    могла бы прочитать уже следующую реплику бота. HTTP ставится через
     ``asyncio.create_task`` — обработчик хода не ждёт ответа; ошибки и
     таймауты только в лог. Служебные run идут на отдельном лайв-треде со
     ``multitask_strategy="interrupt"``; скрипт в кеше мозга ключуется
@@ -138,6 +444,7 @@ class PartialTranscriptSender:
         self._graph = graph
         self._thread_id = thread_id
         self._call_id = call_id
+        self._session: AgentSession | None = None
         self._sending = True
         self._committed = ""
         self._last_sent = ""
@@ -161,6 +468,7 @@ class PartialTranscriptSender:
         Args:
             session: голосовая сессия текущего звонка.
         """
+        self._session = session
 
         @session.on("user_input_transcribed")
         def _on_transcript(ev: UserInputTranscribedEvent) -> None:
@@ -192,10 +500,13 @@ class PartialTranscriptSender:
         if not payload or payload == self._last_sent:
             return
         self._last_sent = payload
+        # Снимок синхронно здесь: к моменту _send история уже может вырасти.
+        messages = chat_history_snapshot(self._session)
         self._schedule_send(
             payload,
             utterance_id=self._utterance_id,
             is_final=ev.is_final,
+            messages=messages,
         )
 
     def on_user_state(self, ev: UserStateChangedEvent) -> None:
@@ -210,13 +521,21 @@ class PartialTranscriptSender:
             self._last_sent = ""
             self._utterance_id = str(uuid.uuid4())
 
-    def _schedule_send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
+    def _schedule_send(
+        self,
+        text: str,
+        *,
+        utterance_id: str,
+        is_final: bool,
+        messages: list[dict[str, str]],
+    ) -> None:
         """Поставить отправку в фон; исключения гасятся в done-callback.
 
         Args:
             text: накопленный текст реплики целиком.
             utterance_id: идентификатор реплики на момент постановки.
             is_final: ``True``, если кусок — финальный распознанный текст.
+            messages: снимок истории на момент постановки (не читать в фоне).
         """
         try:
             loop = asyncio.get_running_loop()
@@ -228,7 +547,12 @@ class PartialTranscriptSender:
             return
 
         task = loop.create_task(
-            self._send(text, utterance_id=utterance_id, is_final=is_final),
+            self._send(
+                text,
+                utterance_id=utterance_id,
+                is_final=is_final,
+                messages=messages,
+            ),
             name="agent-partial-transcript",
         )
         self._tasks.add(task)
@@ -251,7 +575,14 @@ class PartialTranscriptSender:
                 exc,
             )
 
-    async def _send(self, text: str, *, utterance_id: str, is_final: bool) -> None:
+    async def _send(
+        self,
+        text: str,
+        *,
+        utterance_id: str,
+        is_final: bool,
+        messages: list[dict[str, str]],
+    ) -> None:
         """Поставить фоновый run на ``vector_checker``; ответ не читаем.
 
         Граф читает накопленный текст из ``partial_reply``. Новый служебный
@@ -260,16 +591,19 @@ class PartialTranscriptSender:
         ``call_id`` в ``configurable`` указывает на скрипт того же звонка.
         ``partial_utterance_id`` стабилен внутри реплики; мозг сбрасывает
         точку отсчёта прироста при смене идентификатора.
+        Непустой ``messages`` — снимок диалога на момент постановки отправки.
 
         Args:
             text: накопленный распознанный текст целиком.
             utterance_id: идентификатор реплики на момент постановки отправки.
             is_final: ``True``, если это финальный распознанный текст реплики.
+            messages: снимок истории; пустой список в ``input`` не кладём.
         """
         preview = text[:40]
         logger.info(
             "[live] отправка в %s: %d симв., «%s» "
-            "(live_thread=%s, call_id=%s, utterance_id=%s, is_final=%s)",
+            "(live_thread=%s, call_id=%s, utterance_id=%s, is_final=%s, "
+            "messages=%d)",
             self._graph,
             len(text),
             preview,
@@ -277,16 +611,20 @@ class PartialTranscriptSender:
             self._call_id,
             utterance_id,
             is_final,
+            len(messages),
         )
+        payload: dict[str, Any] = {
+            "partial_reply": text,
+            "partial_utterance_id": utterance_id,
+            "partial_is_final": is_final,
+        }
+        if messages:
+            payload["messages"] = messages
         try:
             await self._client.runs.create(
                 thread_id=self._thread_id,
                 assistant_id=self._graph,
-                input={
-                    "partial_reply": text,
-                    "partial_utterance_id": utterance_id,
-                    "partial_is_final": is_final,
-                },
+                input=payload,
                 config={"configurable": {"call_id": self._call_id}},
                 if_not_exists="create",
                 # Свежий кусок важнее очереди устаревших гипотез на лайв-треде.
@@ -482,7 +820,12 @@ def _build_agent_llm(*, settings: Settings, room_name: str) -> llm_module.LLM:
     )
     return langchain.LLMAdapter(
         graph=graph,
-        config={"configurable": {"thread_id": thread_id_for_room(room_name)}},
+        config={
+            "configurable": {
+                "thread_id": thread_id_for_room(room_name),
+                "turn_kind": "client",
+            }
+        },
         stream_mode="custom",
         subgraphs=False,
     )
@@ -521,6 +864,48 @@ def _build_llm(
     return openai.LLM(**llm_kwargs)
 
 
+def _build_tts(
+    *,
+    settings: Settings,
+    elevenlabs_kwargs: dict[str, object],
+    openai_client: openai_sdk.AsyncClient | None,
+) -> tts_module.TTS:
+    """Выбрать провайдера синтеза речи по настройкам.
+
+    ``elevenlabs`` — записанный голос компании по вебсокету, поведение по
+    умолчанию. ``openai`` — запасной провайдер на ключе OpenAI: отдельная
+    оплата не нужна, но плагин объявляет ``streaming=False``, поэтому LiveKit
+    сам обернёт его в ``tts.StreamAdapter`` и будет синтезировать по
+    предложениям — первая порция звука появится позже, чем у ElevenLabs.
+
+    Args:
+        settings: настройки приложения (провайдер, модель, голос, темп).
+        elevenlabs_kwargs: готовые параметры плагина ElevenLabs, включая
+            ``http_session`` с прокси, если он задан.
+        openai_client: общий клиент OpenAI с прокси-транспортом; ``None``,
+            когда прокси не сконфигурирован — тогда ключ передаётся напрямую.
+
+    Returns:
+        Готовый плагин TTS для ``AgentSession``.
+    """
+    if settings.tts_provider == "openai":
+        openai_kwargs: dict[str, object] = {
+            "model": settings.openai_tts_model,
+            "voice": settings.openai_tts_voice,
+            "speed": settings.openai_tts_speed,
+        }
+        instructions = settings.openai_tts_instructions.strip()
+        if instructions:
+            openai_kwargs["instructions"] = instructions
+        if openai_client is not None:
+            # Тот же клиент, что у STT и LLM: второй прокси-обвязки не нужно.
+            openai_kwargs["client"] = openai_client
+        else:
+            openai_kwargs["api_key"] = settings.openai_api_key
+        return openai.TTS(**openai_kwargs)
+    return elevenlabs.TTS(**elevenlabs_kwargs)
+
+
 def build_session(settings: Settings, *, room_name: str | None = None) -> AgentSession:
     """Создать :class:`AgentSession` с провайдерами из настроек.
 
@@ -530,8 +915,9 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
 
     Если задан прокси, внешний трафик OpenAI (``proxy_url`` / httpx) и
     ElevenLabs (``proxy_fields`` / aiohttp_socks) идёт через SOCKS5;
-    иначе клиенты работают напрямую. Трафик к агентскому графу в прокси
-    не заворачивается.
+    иначе клиенты работают напрямую. При ``tts_provider=openai`` синтез
+    идёт через тот же клиент OpenAI, а aiohttp-сессия ElevenLabs не
+    создаётся. Трафик к агентскому графу в прокси не заворачивается.
 
     Args:
         settings: настройки приложения (модели, язык, идентификатор голоса, ключи).
@@ -551,7 +937,7 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         "model": settings.llm_model,
         "api_key": settings.openai_api_key,
     }
-    tts_kwargs: dict[str, object] = {
+    elevenlabs_kwargs: dict[str, object] = {
         "voice_id": settings.elevenlabs_voice_id,
         "model": settings.tts_model,
         "api_key": settings.elevenlabs_api_key,
@@ -564,6 +950,7 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         ),
     }
 
+    openai_client: openai_sdk.AsyncClient | None = None
     proxy_url = settings.proxy_url
     proxy_fields = settings.proxy_fields
     if proxy_url is not None and proxy_fields is not None:
@@ -573,7 +960,10 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         )
         stt_kwargs["client"] = openai_client
         llm_kwargs["client"] = openai_client
-        tts_kwargs["http_session"] = _build_elevenlabs_session(proxy_fields=proxy_fields)
+        # Отдельная aiohttp-сессия нужна только ElevenLabs: OpenAI ходит
+        # через тот же httpx-клиент, что STT и LLM.
+        if settings.tts_provider == "elevenlabs":
+            elevenlabs_kwargs["http_session"] = _build_elevenlabs_session(proxy_fields=proxy_fields)
 
     # VAD один на сессию: его же переиспользует StreamAdapter сервиса
     # распознавания, чтобы не держать в памяти вторую копию модели Silero.
@@ -584,10 +974,16 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         stt=_build_stt(settings=settings, stt_kwargs=stt_kwargs, vad=vad),
         # «Мозг»: OpenAI или удалённый граф — переключатель в настройках.
         llm=_build_llm(settings=settings, llm_kwargs=llm_kwargs, room_name=room_name),
-        # Текст → голос. voice_id — тот самый записанный голос компании.
-        tts=elevenlabs.TTS(**tts_kwargs),
+        # Текст → голос. Провайдер переключается в настройках, без правок кода.
+        tts=_build_tts(
+            settings=settings,
+            elevenlabs_kwargs=elevenlabs_kwargs,
+            openai_client=openai_client,
+        ),
         # Слышит границы речи (начал/закончил говорить).
         vad=vad,
         # Определяет, что реплика клиента завершена (мультиязычная модель).
         turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
+        # Штатный детект тишины LiveKit: оба молчат → user_state=away.
+        user_away_timeout=settings.silence_timeout or None,
     )
