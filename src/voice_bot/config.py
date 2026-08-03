@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     elevenlabs_stability: float = Field(default=0.7, alias="ELEVENLABS_STABILITY")
     elevenlabs_similarity: float = Field(default=0.8, alias="ELEVENLABS_SIMILARITY")
     elevenlabs_style: float = Field(default=0.0, alias="ELEVENLABS_STYLE")
+    # Штатная нормализация текста ElevenLabs: разворачивает в слова числа, даты,
+    # время, валюты и сокращения ("ул.", "пр."). Уходит и в вебсокет-режим —
+    # плагин клеит параметр в строку подключения.
+    # "on" — включена всегда; "auto" — решает провайдер (дефолт плагина, поведение
+    # до этой настройки); "off" — нормализация выключена полностью.
+    elevenlabs_text_normalization: Literal["auto", "on", "off"] = Field(
+        default="on", alias="ELEVENLABS_TEXT_NORMALIZATION"
+    )
 
     # --- SOCKS5-прокси (опционально; обход региональных блокировок) ---
     # Главный выключатель, как у мозга: при false заполненные PROXY_* игнорируются.
