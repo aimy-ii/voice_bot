@@ -881,7 +881,8 @@ def _build_tts(
     Args:
         settings: настройки приложения (провайдер, модель, голос, темп).
         elevenlabs_kwargs: готовые параметры плагина ElevenLabs, включая
-            ``http_session`` с прокси, если он задан.
+            ``apply_text_normalization`` и ``http_session`` с прокси, если он
+            задан.
         openai_client: общий клиент OpenAI с прокси-транспортом; ``None``,
             когда прокси не сконфигурирован — тогда ключ передаётся напрямую.
 
@@ -948,6 +949,8 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
             style=settings.elevenlabs_style,
             speed=1.0,
         ),
+        # Числа, даты и сокращения проговариваются словами, а не символами.
+        "apply_text_normalization": settings.elevenlabs_text_normalization,
     }
 
     openai_client: openai_sdk.AsyncClient | None = None

@@ -502,3 +502,51 @@ def test_build_session_is_proxy_false_skips_proxy_clients(
     openai_client_mock.assert_not_called()
     assert "http_session" not in mocks["tts"].call_args.kwargs
     mocks["tts"].assert_called_once()
+
+
+def test_build_session_elevenlabs_text_normalization_default_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """По умолчанию ElevenLabs получает apply_text_normalization=on."""
+    _set_session_env(monkeypatch)
+    monkeypatch.delenv("ELEVENLABS_TEXT_NORMALIZATION", raising=False)
+    mocks = _patch_common_providers(monkeypatch)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    session_module.build_session(settings)
+
+    mocks["tts"].assert_called_once()
+    mocks["tts_openai"].assert_not_called()
+    assert mocks["tts"].call_args.kwargs["apply_text_normalization"] == "on"
+    assert "apply_language_text_normalization" not in mocks["tts"].call_args.kwargs
+
+
+def test_build_session_elevenlabs_text_normalization_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ELEVENLABS_TEXT_NORMALIZATION из окружения доезжает до плагина ElevenLabs."""
+    _set_session_env(monkeypatch)
+    monkeypatch.setenv("ELEVENLABS_TEXT_NORMALIZATION", "auto")
+    mocks = _patch_common_providers(monkeypatch)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    session_module.build_session(settings)
+
+    mocks["tts"].assert_called_once()
+    assert mocks["tts"].call_args.kwargs["apply_text_normalization"] == "auto"
+
+
+def test_build_session_openai_tts_has_no_text_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При openai TTS параметр нормализации ElevenLabs не передаётся."""
+    _set_session_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "openai")
+    mocks = _patch_common_providers(monkeypatch)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    session_module.build_session(settings)
+
+    mocks["tts_openai"].assert_called_once()
+    mocks["tts"].assert_not_called()
+    assert "apply_text_normalization" not in mocks["tts_openai"].call_args.kwargs

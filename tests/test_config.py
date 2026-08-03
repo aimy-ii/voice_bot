@@ -554,3 +554,39 @@ def test_openai_tts_field_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.openai_tts_voice == "shimmer"
     assert settings.openai_tts_instructions == ""
     assert settings.openai_tts_speed == 1.0
+
+
+def test_elevenlabs_text_normalization_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без ELEVENLABS_TEXT_NORMALIZATION — штатная нормализация включена (on)."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("ELEVENLABS_TEXT_NORMALIZATION", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.elevenlabs_text_normalization == "on"
+
+
+def test_elevenlabs_text_normalization_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ELEVENLABS_TEXT_NORMALIZATION читается из окружения (auto / off)."""
+    _set_required_env(monkeypatch)
+
+    monkeypatch.setenv("ELEVENLABS_TEXT_NORMALIZATION", "auto")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.elevenlabs_text_normalization == "auto"
+
+    monkeypatch.setenv("ELEVENLABS_TEXT_NORMALIZATION", "off")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.elevenlabs_text_normalization == "off"
+
+
+def test_elevenlabs_text_normalization_rejects_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Недопустимое значение ELEVENLABS_TEXT_NORMALIZATION роняет валидацию."""
+    from pydantic import ValidationError
+
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("ELEVENLABS_TEXT_NORMALIZATION", "yes")
+
+    with pytest.raises(ValidationError, match="ELEVENLABS_TEXT_NORMALIZATION"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
