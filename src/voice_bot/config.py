@@ -8,7 +8,7 @@
 from functools import lru_cache
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,7 +49,13 @@ class Settings(BaseSettings):
     elevenlabs_style: float = Field(default=0.0, alias="ELEVENLABS_STYLE")
 
     # --- SOCKS5-прокси (опционально; обход региональных блокировок) ---
+    # Главный выключатель, как у мозга: при false заполненные PROXY_* игнорируются.
+    # Так один и тот же .env работает и локально (true), и на сервере в США (false),
+    # без вычищения значений — пустая строка в PROXY_PORT роняла старт.
+    is_proxy: bool = Field(default=False, alias="IS_PROXY")
     proxy_host: str | None = Field(default=None, alias="PROXY_HOST")
+    # Пустая строка приходит из .env как "", в int | None не приводится и роняет
+    # бота на старте. Валидатор ниже превращает её в None.
     proxy_port: int | None = Field(default=None, alias="PROXY_PORT")
     proxy_user: str | None = Field(default=None, alias="PROXY_USER")
     proxy_pass: str | None = Field(default=None, alias="PROXY_PASS")
@@ -146,6 +152,25 @@ class Settings(BaseSettings):
     #: Сколько продолжений подряд разрешено, страховка от монолога.
     max_continuations: int = Field(default=3, alias="VOICE_BOT_MAX_CONTINUATIONS")
 
+    @field_validator("proxy_port", mode="before")
+    @classmethod
+    def _empty_proxy_port_to_none(cls, value: object) -> object:
+        """Превратить пустую строку в PROXY_PORT в None.
+
+        Пустая строка в .env (``PROXY_PORT=``) не приводится к ``int`` и роняет
+        бота на старте. Отсутствие значения и пустая строка должны вести себя
+        одинаково — прокси просто не сконфигурирован.
+
+        Аргументы:
+            value: исходное значение переменной окружения.
+
+        Возвращает:
+            None для пустой строки или строки из пробелов, иначе значение как есть.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @model_validator(mode="after")
     def _validate_required_settings(self) -> Self:
         """Проверить обязательные поля: пустые строки ловим на старте.
@@ -227,8 +252,11 @@ class Settings(BaseSettings):
         """Собрать SOCKS5-URL прокси или None, если прокси не сконфигурирован.
 
         Формат socks5h:// — DNS резолвится на стороне прокси (нужно для обхода
-        региональных блокировок).
+        региональных блокировок). При ``IS_PROXY=false`` возвращается ``None``
+        независимо от заполненности ``PROXY_*``.
         """
+        if not self.is_proxy:
+            return None
         if not (self.proxy_host and self.proxy_port):
             return None
         if self.proxy_user and self.proxy_pass:
@@ -243,8 +271,12 @@ class Settings(BaseSettings):
 
         Возвращается отдельно от proxy_url, потому что python_socks не понимает
         схему socks5h. DNS-резолв на стороне прокси включается флагом rdns=True
-        при создании коннектора, а не суффиксом h в схеме.
+        при создании коннектора, а не суффиксом h в схеме. При
+        ``IS_PROXY=false`` возвращается ``None`` независимо от заполненности
+        ``PROXY_*``.
         """
+        if not self.is_proxy:
+            return None
         if not (self.proxy_host and self.proxy_port):
             return None
         fields: dict[str, object] = {

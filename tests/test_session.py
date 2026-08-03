@@ -399,6 +399,7 @@ def test_build_session_openai_tts_with_proxy_shares_client(
     """С прокси при openai TTS — общий client у STT, LLM и TTS; api_key нет."""
     _set_session_env(monkeypatch)
     monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "openai")
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "user")
@@ -427,6 +428,7 @@ def test_build_session_proxy_skips_elevenlabs_session_for_openai_tts(
     """С прокси при openai TTS — _build_elevenlabs_session не вызывается."""
     _set_session_env(monkeypatch)
     monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "openai")
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "user")
@@ -453,6 +455,7 @@ def test_build_session_proxy_builds_elevenlabs_session_for_elevenlabs_tts(
     """С прокси при elevenlabs TTS — _build_elevenlabs_session ровно один раз."""
     _set_session_env(monkeypatch)
     monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "user")
@@ -473,3 +476,29 @@ def test_build_session_proxy_builds_elevenlabs_session_for_elevenlabs_tts(
     elevenlabs_session_mock.assert_called_once()
     assert mocks["tts"].call_args.kwargs["http_session"] is http_session
     mocks["tts_openai"].assert_not_called()
+
+
+def test_build_session_is_proxy_false_skips_proxy_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При IS_PROXY=false заполненные PROXY_* не создают прокси-клиенты."""
+    _set_session_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_TTS_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("IS_PROXY", "false")
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+    mocks = _patch_common_providers(monkeypatch)
+    elevenlabs_session_mock = MagicMock(name="_build_elevenlabs_session")
+    openai_client_mock = MagicMock(name="_build_openai_client")
+    monkeypatch.setattr(session_module, "_build_elevenlabs_session", elevenlabs_session_mock)
+    monkeypatch.setattr(session_module, "_build_openai_client", openai_client_mock)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    session_module.build_session(settings)
+
+    elevenlabs_session_mock.assert_not_called()
+    openai_client_mock.assert_not_called()
+    assert "http_session" not in mocks["tts"].call_args.kwargs
+    mocks["tts"].assert_called_once()

@@ -90,6 +90,7 @@ def test_proxy_url_none_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_url_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """При всех PROXY_* собирается socks5h://user:pass@host:port."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "user")
@@ -103,6 +104,7 @@ def test_proxy_url_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_url_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без user/pass собирается socks5h://host:port."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "")
@@ -126,6 +128,7 @@ def test_proxy_fields_none_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_fields_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """При всех PROXY_* — host/port/rdns и username/password."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "user")
@@ -145,6 +148,7 @@ def test_proxy_fields_with_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_proxy_fields_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     """Без user/pass — только host/port/rdns."""
     _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
     monkeypatch.setenv("PROXY_HOST", "proxy.example")
     monkeypatch.setenv("PROXY_PORT", "1080")
     monkeypatch.setenv("PROXY_USER", "")
@@ -157,6 +161,69 @@ def test_proxy_fields_without_auth(monkeypatch: pytest.MonkeyPatch) -> None:
         "port": 1080,
         "rdns": True,
     }
+
+
+def test_proxy_disabled_by_is_proxy_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """При IS_PROXY=false заполненные PROXY_* игнорируются."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "false")
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
+
+
+def test_proxy_disabled_when_is_proxy_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Без IS_PROXY дефолт false — заполненные PROXY_* тоже игнорируются."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("IS_PROXY", raising=False)
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "1080")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.is_proxy is False
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
+
+
+def test_proxy_empty_port_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пустая строка в PROXY_PORT не роняет старт и даёт None в свойствах."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.proxy_port is None
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
+
+
+def test_proxy_whitespace_port_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Строка из пробелов в PROXY_PORT ведёт себя как пустая."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IS_PROXY", "true")
+    monkeypatch.setenv("PROXY_HOST", "proxy.example")
+    monkeypatch.setenv("PROXY_PORT", "  ")
+    monkeypatch.setenv("PROXY_USER", "user")
+    monkeypatch.setenv("PROXY_PASS", "pass")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.proxy_port is None
+    assert settings.proxy_url is None
+    assert settings.proxy_fields is None
 
 
 def test_background_audio_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
