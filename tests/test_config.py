@@ -460,6 +460,11 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("VOICE_BOT_SILENCE_GOODBYE", raising=False)
     monkeypatch.delenv("VOICE_BOT_SILENCE_ATTEMPTS", raising=False)
     monkeypatch.delenv("VOICE_BOT_MAX_CONTINUATIONS", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_SMART_PAUSES", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_PAUSE_QUESTION", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_PAUSE_STATEMENT", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK_PAUSE", raising=False)
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -469,6 +474,37 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert (
         settings.silence_goodbye == "Видимо, что-то со связью. Попробуйте, пожалуйста, перезвонить."
     )
+    assert settings.silence_smart_pauses is False
+    assert settings.silence_pause_question == 4.0
+    assert settings.silence_pause_statement == 1.2
+    assert settings.silence_link_check_pause == 3.5
+    assert settings.silence_link_check == "Алло, меня слышно?"
+
+
+def test_silence_smart_pauses_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VOICE_BOT_SILENCE_SMART_PAUSES=true парсится в bool True."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_SILENCE_SMART_PAUSES", "true")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.silence_smart_pauses is True
+
+
+def test_silence_smart_pause_fields_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Паузы и текст проверки связи читаются из окружения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_SILENCE_PAUSE_QUESTION", "5.5")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_PAUSE_STATEMENT", "0.8")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_LINK_CHECK", "Вы на линии?")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_LINK_CHECK_PAUSE", "2.0")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.silence_pause_question == 5.5
+    assert settings.silence_pause_statement == 0.8
+    assert settings.silence_link_check == "Вы на линии?"
+    assert settings.silence_link_check_pause == 2.0
 
 
 def test_tts_provider_defaults_to_elevenlabs(monkeypatch: pytest.MonkeyPatch) -> None:

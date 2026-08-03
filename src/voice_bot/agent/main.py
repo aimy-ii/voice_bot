@@ -36,6 +36,7 @@ from voice_bot.agent.session import (
     build_live_langgraph_client,
     build_partial_transcript_sender,
     build_session,
+    chat_history_snapshot,
     expects_continuation,
     is_conversation_ended,
     live_conversation_ended,
@@ -43,6 +44,7 @@ from voice_bot.agent.session import (
     set_turn_kind,
     thread_id_for_room,
 )
+from voice_bot.agent.silence import pick_pause
 from voice_bot.config import Settings, get_settings
 from voice_bot.logging_setup import setup_logging
 from voice_bot.scenario.loader import load_scenario
@@ -133,6 +135,10 @@ class CallTurnController:
         self.away_task: asyncio.Task[None] | None = None
         self._listen_away_task: asyncio.Task[None] | None = None
         self._silence_deferred: bool = False
+        #: Задача собственного отсчёта тишины от момента, когда бот договорил.
+        self._silence_wait_task: asyncio.Task[None] | None = None
+        #: Проверку связи в этом заходе уже произносили — второй раз не повторяем.
+        self._link_checked: bool = False
         #: Мозг пометил разговор оконченным — оклики и продолжения больше не нужны.
         self._ending: bool = False
         self._finished_tasks: set[asyncio.Task[None]] = set()
@@ -149,6 +155,7 @@ class CallTurnController:
                 self.on_agent_listening()
             else:
                 self._cancel_listen_away_wait()
+                self._cancel_silence_wait()
 
         @self._session.on("user_state_changed")
         def _on_user(ev: UserStateChangedEvent) -> None:
@@ -222,6 +229,8 @@ class CallTurnController:
         task = self.away_task
         self.away_task = None
         self.silence_attempts = 0
+        self._link_checked = False
+        self._cancel_silence_wait()
         if task is None or task.done():
             return
         logger.info("[turn] пользователь вернулся: оклики отменены")
@@ -243,6 +252,7 @@ class CallTurnController:
         Returns:
             None.
         """
+        self._schedule_silence_wait()
         if self._ending:
             return
         if not self._silence_deferred:
@@ -266,6 +276,108 @@ class CallTurnController:
             self._away_after_listen_timeout(),
             name="listen-away-wait",
         )
+
+    def _pick_pause(self) -> tuple[float, str]:
+        """Выбрать длину паузы перед следующей репликой бота.
+
+        При выключенном тумблере всегда возвращает фиксированный
+        ``silence_timeout`` — это поведение до появления механики. При
+        включённом — считает паузу по последней реплике бота.
+
+        Returns:
+            Пара «длина паузы в секундах, причина выбора для лога».
+        """
+        if not self._settings.silence_smart_pauses:
+            return self._settings.silence_timeout, "фиксированная"
+        history = chat_history_snapshot(self._session)
+        return pick_pause(
+            history,
+            pause_question=self._settings.silence_pause_question,
+            pause_statement=self._settings.silence_pause_statement,
+        )
+
+    def _schedule_silence_wait(self) -> None:
+        """Взвести собственный отсчёт тишины от момента, когда бот договорил.
+
+        Отсчёт не стартует, если звонок завершается или оклики уже идут.
+        Предыдущий отсчёт отменяется, чтобы на одну паузу не пришлось два
+        таймера.
+
+        Returns:
+            None.
+        """
+        if self._ending:
+            return
+        if self.away_task is not None and not self.away_task.done():
+            return
+        # Отложенная отметка молчания обрабатывается старым путём
+        # (_listen_away_task); параллельный отсчёт здесь не нужен.
+        if self._silence_deferred:
+            return
+        self._cancel_silence_wait()
+        pause, reason = self._pick_pause()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("Нет event loop для отсчёта тишины")
+            return
+        logger.info("[turn] тишина: отсчёт %.1fс (%s)", pause, reason)
+        self._silence_wait_task = loop.create_task(
+            self._silence_wait(pause),
+            name="silence-wait",
+        )
+
+    def _cancel_silence_wait(self) -> None:
+        """Отменить собственный отсчёт тишины.
+
+        Returns:
+            None.
+        """
+        task = self._silence_wait_task
+        self._silence_wait_task = None
+        if task is None or task.done():
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current:
+            task.cancel()
+
+    async def _silence_wait(self, pause: float) -> None:
+        """Дождаться паузы и, если человек не заговорил, запустить оклики.
+
+        Args:
+            pause: сколько секунд ждать.
+
+        Returns:
+            None.
+        """
+        try:
+            await asyncio.sleep(pause)
+        except asyncio.CancelledError:
+            return
+        if self._ending:
+            return
+        if self._agent_state() != "listening":
+            return
+        self.on_user_away()
+
+    async def _say_and_wait(self, text: str) -> None:
+        """Произнести дословную фразу и дождаться конца проигрывания.
+
+        Args:
+            text: что произнести.
+
+        Returns:
+            None.
+        """
+        handle = self._session.say(text)
+        wait = getattr(handle, "wait_for_playout", None)
+        if callable(wait):
+            result = wait()
+            if inspect.isawaitable(result):
+                await result
 
     def _cancel_listen_away_wait(self) -> None:
         """Отменить отложенный старт окликов после перехода в listening.
@@ -470,7 +582,22 @@ class CallTurnController:
                     if cancelled:
                         logger.info("[turn] тишина: turn_kind возвращён в client после отмены")
 
-                await asyncio.sleep(self._settings.silence_timeout)
+                pause, reason = self._pick_pause()
+                logger.info(
+                    "[turn] тишина: попытка #%s из %s, пауза %.1fс (%s)",
+                    self.silence_attempts,
+                    max_attempts,
+                    pause,
+                    reason,
+                )
+                await asyncio.sleep(pause)
+
+            if self._settings.silence_smart_pauses and not self._link_checked:
+                self._link_checked = True
+                phrase = self._settings.silence_link_check
+                logger.info("[turn] тишина: проверка связи, фраза=%r", phrase)
+                await self._say_and_wait(phrase)
+                await asyncio.sleep(self._settings.silence_link_check_pause)
 
             goodbye = self._settings.silence_goodbye
             logger.info(

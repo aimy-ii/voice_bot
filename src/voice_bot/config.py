@@ -157,6 +157,20 @@ class Settings(BaseSettings):
     )
     #: Сколько раз пробуем вернуть человека в разговор, прежде чем прощаться.
     silence_attempts: int = Field(default=2, alias="VOICE_BOT_SILENCE_ATTEMPTS")
+    #: Тумблер механики пауз. Выключено — бот ждёт фиксированный
+    #: VOICE_BOT_SILENCE_TIMEOUT, ровно как до появления механики.
+    #: Включено — длина паузы зависит от знака вопроса в реплике бота.
+    silence_smart_pauses: bool = Field(default=False, alias="VOICE_BOT_SILENCE_SMART_PAUSES")
+    #: Сколько ждать ответа, если бот закончил реплику вопросом.
+    silence_pause_question: float = Field(default=4.0, alias="VOICE_BOT_SILENCE_PAUSE_QUESTION")
+    #: Сколько ждать, если вопроса в реплике бота не было.
+    silence_pause_statement: float = Field(default=1.2, alias="VOICE_BOT_SILENCE_PAUSE_STATEMENT")
+    #: Что сказать перед прощанием, когда человек перестал отвечать.
+    silence_link_check: str = Field(
+        default="Алло, меня слышно?", alias="VOICE_BOT_SILENCE_LINK_CHECK"
+    )
+    #: Сколько ждать ответа после проверки связи, прежде чем прощаться.
+    silence_link_check_pause: float = Field(default=3.5, alias="VOICE_BOT_SILENCE_LINK_CHECK_PAUSE")
     #: Сколько продолжений подряд разрешено, страховка от монолога.
     max_continuations: int = Field(default=3, alias="VOICE_BOT_MAX_CONTINUATIONS")
 
