@@ -587,7 +587,7 @@ class CallTurnController:
                         await self._session.generate_reply()
                     finally:
                         set_turn_kind(self._session.llm, "client")
-                await asyncio.sleep(self._settings.silence_pause_question)
+                    await asyncio.sleep(self._settings.silence_pause_question)
             else:
                 max_attempts = self._settings.silence_attempts
                 while self.silence_attempts < max_attempts:

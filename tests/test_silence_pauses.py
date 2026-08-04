@@ -407,6 +407,91 @@ async def test_modes_on_question_skips_generate_goes_to_link_check() -> None:
 
 
 @pytest.mark.asyncio
+async def test_modes_on_question_skips_silence_pause_question() -> None:
+    """Реплика с вопросом — между решением и проверкой связи нет silence_pause_question."""
+    pause_question = 0.04
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=pause_question,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+    )
+    controller = _controller(settings=settings)
+    history = [{"type": "ai", "content": "Как вас зовут?"}]
+    sleep_args: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def _track_sleep(delay: float, *args: object, **kwargs: object) -> None:
+        sleep_args.append(delay)
+        await real_sleep(0)
+
+    with (
+        patch.object(main_module, "chat_history_snapshot", return_value=history),
+        patch.object(main_module.asyncio, "sleep", side_effect=_track_sleep),
+    ):
+        controller.on_user_away()
+        task = controller.away_task
+        assert task is not None
+        await task
+
+    assert pause_question not in sleep_args
+
+
+@pytest.mark.asyncio
+async def test_modes_on_statement_sleeps_silence_pause_question_once() -> None:
+    """Реплика без вопроса — silence_pause_question ровно один раз после pull."""
+    pause_question = 0.04
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=pause_question,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    history = [{"type": "ai", "content": "Хорошо, записала."}]
+    sleep_args: list[float] = []
+    pull_done = False
+    real_sleep = asyncio.sleep
+
+    async def _track_generate() -> None:
+        nonlocal pull_done
+        pull_done = True
+
+    async def _track_sleep(delay: float, *args: object, **kwargs: object) -> None:
+        sleep_args.append(delay)
+        if delay == pause_question:
+            assert pull_done is True
+        await real_sleep(0)
+
+    session.generate_reply = AsyncMock(side_effect=_track_generate)
+
+    with (
+        patch.object(main_module, "chat_history_snapshot", return_value=history),
+        patch.object(main_module.asyncio, "sleep", side_effect=_track_sleep),
+    ):
+        controller.on_user_away()
+        task = controller.away_task
+        assert task is not None
+        await task
+
+    assert sleep_args.count(pause_question) == 1
+    assert session.generate_reply.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_modes_on_generate_reply_at_most_once() -> None:
     """При включённом silence_modes generate_reply вызывается не более одного раза."""
     settings = _settings(
