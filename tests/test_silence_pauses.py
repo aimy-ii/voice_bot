@@ -27,6 +27,8 @@ def _settings(**overrides: object) -> Settings:
         "VOICE_BOT_SILENCE_PAUSE_STATEMENT": 0.02,
         "VOICE_BOT_SILENCE_LINK_CHECK": "Алло, меня слышно?",
         "VOICE_BOT_SILENCE_LINK_CHECK_PAUSE": 0.01,
+        "VOICE_BOT_SILENCE_LINK_CHECK_SECOND": "Алло?",
+        "VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE": 0.01,
         "_env_file": None,
     }
     base.update(overrides)
@@ -120,13 +122,49 @@ def test_pick_pause_toggle_on_statement() -> None:
 
 @pytest.mark.asyncio
 async def test_link_check_once_before_goodbye() -> None:
-    """При включённом тумблере: проверка связи, затем прощание."""
+    """При включённом тумблере: две попытки проверки связи, затем прощание."""
     settings = _settings(
         VOICE_BOT_SILENCE_SMART_PAUSES=True,
         VOICE_BOT_SILENCE_TIMEOUT=0,
         VOICE_BOT_SILENCE_ATTEMPTS=2,
         VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
         VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="Алло?",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    said: list[str] = []
+
+    def _track_say(text: str, *_a: object, **_k: object) -> SimpleNamespace:
+        said.append(text)
+        return SimpleNamespace(wait_for_playout=AsyncMock())
+
+    session.say = MagicMock(side_effect=_track_say)
+
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
+    await task
+
+    assert said == ["Алло, меня слышно?", "Алло?", "до связи"]
+    controller._ctx.delete_room.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_link_check_second_empty_skips_second_attempt() -> None:
+    """Пустая вторая фраза выключает вторую попытку: первая и прощание."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
         VOICE_BOT_SILENCE_GOODBYE="до связи",
         VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
         VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
@@ -147,7 +185,50 @@ async def test_link_check_once_before_goodbye() -> None:
     await task
 
     assert said == ["Алло, меня слышно?", "до связи"]
-    controller._ctx.delete_room.assert_called_once_with()
+    assert session.say.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_user_present_between_link_check_attempts_skips_goodbye() -> None:
+    """Реплика человека между попытками проверки связи — прощание не произносится."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0.5,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="Алло?",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    said: list[str] = []
+
+    def _track_say(text: str, *_a: object, **_k: object) -> SimpleNamespace:
+        said.append(text)
+        return SimpleNamespace(wait_for_playout=AsyncMock())
+
+    session.say = MagicMock(side_effect=_track_say)
+
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
+
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if said == ["Алло, меня слышно?"]:
+            break
+    assert said == ["Алло, меня слышно?"]
+
+    controller.on_user_present()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert "до связи" not in said
+    assert "Алло?" not in said
+    controller._ctx.delete_room.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -257,6 +338,8 @@ async def test_modes_on_statement_sends_pull_then_link_check() -> None:
         VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
         VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
         VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="Алло?",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
         VOICE_BOT_SILENCE_GOODBYE="до связи",
     )
     controller = _controller(settings=settings)
@@ -283,7 +366,7 @@ async def test_modes_on_statement_sends_pull_then_link_check() -> None:
         await task
 
     assert turn_kinds == ["pull"]
-    assert said == ["Алло, меня слышно?", "до связи"]
+    assert said == ["Алло, меня слышно?", "Алло?", "до связи"]
     assert session.generate_reply.await_count == 1
 
 
@@ -298,6 +381,8 @@ async def test_modes_on_question_skips_generate_goes_to_link_check() -> None:
         VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
         VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
         VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="Алло?",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
         VOICE_BOT_SILENCE_GOODBYE="до связи",
     )
     controller = _controller(settings=settings)
@@ -318,7 +403,7 @@ async def test_modes_on_question_skips_generate_goes_to_link_check() -> None:
         await task
 
     session.generate_reply.assert_not_awaited()
-    assert said == ["Алло, меня слышно?", "до связи"]
+    assert said == ["Алло, меня слышно?", "Алло?", "до связи"]
 
 
 @pytest.mark.asyncio

@@ -621,9 +621,15 @@ class CallTurnController:
             if self._settings.silence_smart_pauses and not self._link_checked:
                 self._link_checked = True
                 phrase = self._settings.silence_link_check
-                logger.info("[turn] тишина: проверка связи, фраза=%r", phrase)
+                logger.info("[turn] тишина: проверка связи, попытка 1, фраза=%r", phrase)
                 await self._say_and_wait(phrase)
                 await asyncio.sleep(self._settings.silence_link_check_pause)
+
+                second = self._settings.silence_link_check_second.strip()
+                if second:
+                    logger.info("[turn] тишина: проверка связи, попытка 2, фраза=%r", second)
+                    await self._say_and_wait(second)
+                    await asyncio.sleep(self._settings.silence_link_check_second_pause)
 
             goodbye = self._settings.silence_goodbye
             logger.info(

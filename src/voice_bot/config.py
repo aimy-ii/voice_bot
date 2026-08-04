@@ -169,8 +169,16 @@ class Settings(BaseSettings):
     silence_link_check: str = Field(
         default="Алло, меня слышно?", alias="VOICE_BOT_SILENCE_LINK_CHECK"
     )
-    #: Сколько ждать ответа после проверки связи, прежде чем прощаться.
-    silence_link_check_pause: float = Field(default=3.5, alias="VOICE_BOT_SILENCE_LINK_CHECK_PAUSE")
+    #: Сколько ждать после первой попытки, прежде чем говорить вторую.
+    silence_link_check_pause: float = Field(default=1.5, alias="VOICE_BOT_SILENCE_LINK_CHECK_PAUSE")
+    #: Вторая, короткая попытка достучаться, если после первой тишина.
+    silence_link_check_second: str = Field(
+        default="Алло, меня слышно?", alias="VOICE_BOT_SILENCE_LINK_CHECK_SECOND"
+    )
+    #: Сколько ждать после второй попытки, прежде чем прощаться.
+    silence_link_check_second_pause: float = Field(
+        default=1.0, alias="VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE"
+    )
     #: Тумблер упрощённой лестницы молчания. Выключено — цикл попыток
     #: `silence`, как раньше. Включено — один `pull` или сразу проверка связи
     #: по знаку вопроса в последней реплике бота.

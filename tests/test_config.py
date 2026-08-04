@@ -465,6 +465,8 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("VOICE_BOT_SILENCE_PAUSE_STATEMENT", raising=False)
     monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK", raising=False)
     monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK_PAUSE", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK_SECOND", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE", raising=False)
     monkeypatch.delenv("VOICE_BOT_SILENCE_MODES", raising=False)
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
@@ -478,8 +480,10 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.silence_smart_pauses is False
     assert settings.silence_pause_question == 4.0
     assert settings.silence_pause_statement == 1.2
-    assert settings.silence_link_check_pause == 3.5
+    assert settings.silence_link_check_pause == 1.5
     assert settings.silence_link_check == "Алло, меня слышно?"
+    assert settings.silence_link_check_second == "Алло, меня слышно?"
+    assert settings.silence_link_check_second_pause == 1.0
     assert settings.silence_modes is False
 
 
@@ -520,6 +524,8 @@ def test_silence_smart_pause_fields_from_env(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("VOICE_BOT_SILENCE_PAUSE_STATEMENT", "0.8")
     monkeypatch.setenv("VOICE_BOT_SILENCE_LINK_CHECK", "Вы на линии?")
     monkeypatch.setenv("VOICE_BOT_SILENCE_LINK_CHECK_PAUSE", "2.0")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_LINK_CHECK_SECOND", "Ещё раз: слышно?")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE", "0.5")
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -527,6 +533,8 @@ def test_silence_smart_pause_fields_from_env(monkeypatch: pytest.MonkeyPatch) ->
     assert settings.silence_pause_statement == 0.8
     assert settings.silence_link_check == "Вы на линии?"
     assert settings.silence_link_check_pause == 2.0
+    assert settings.silence_link_check_second == "Ещё раз: слышно?"
+    assert settings.silence_link_check_second_pause == 0.5
 
 
 def test_tts_provider_defaults_to_elevenlabs(monkeypatch: pytest.MonkeyPatch) -> None:
