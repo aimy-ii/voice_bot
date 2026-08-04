@@ -539,3 +539,129 @@ async def test_ending_skips_silence_ladder() -> None:
     assert controller.away_task is None
     session.generate_reply.assert_not_awaited()
     session.say.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ending_before_ladder_skips_all_steps() -> None:
+    """Признак до запуска лестницы — ни generate_reply, ни say."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    history = [{"type": "ai", "content": "Хорошо, записала."}]
+
+    controller._ending = True
+    with patch.object(main_module, "chat_history_snapshot", return_value=history):
+        await controller._away_prompts()
+
+    session.generate_reply.assert_not_awaited()
+    session.say.assert_not_called()
+    controller._ctx.delete_room.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ending_after_pull_skips_link_check_and_goodbye() -> None:
+    """Признак после pull — проверка связи и прощание по тишине не произносятся."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="Алло?",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    history = [{"type": "ai", "content": "Хорошо, записала."}]
+    said: list[str] = []
+
+    async def _track_generate() -> None:
+        controller._ending = True
+
+    def _track_say(text: str, *_a: object, **_k: object) -> SimpleNamespace:
+        said.append(text)
+        return SimpleNamespace(wait_for_playout=AsyncMock())
+
+    session.generate_reply = AsyncMock(side_effect=_track_generate)
+    session.say = MagicMock(side_effect=_track_say)
+
+    with patch.object(main_module, "chat_history_snapshot", return_value=history):
+        controller.on_user_away()
+        task = controller.away_task
+        assert task is not None
+        await task
+
+    assert session.generate_reply.await_count == 1
+    assert said == []
+    controller._ctx.delete_room.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ending_between_link_checks_skips_second_and_goodbye() -> None:
+    """Признак между фразами проверки связи — вторая и прощание не звучат."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND="Алло?",
+        VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE=0,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    history = [{"type": "ai", "content": "Как вас зовут?"}]
+    said: list[str] = []
+
+    def _track_say(text: str, *_a: object, **_k: object) -> SimpleNamespace:
+        said.append(text)
+        if text == "Алло, меня слышно?":
+            controller._ending = True
+        return SimpleNamespace(wait_for_playout=AsyncMock())
+
+    session.say = MagicMock(side_effect=_track_say)
+
+    with patch.object(main_module, "chat_history_snapshot", return_value=history):
+        controller.on_user_away()
+        task = controller.away_task
+        assert task is not None
+        await task
+
+    session.generate_reply.assert_not_awaited()
+    assert said == ["Алло, меня слышно?"]
+    controller._ctx.delete_room.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_ending_modes_off_skips_silence_attempts() -> None:
+    """Тумблер выключен, признак выставлен — цикл попыток не делает ходов."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=False,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+
+    controller._ending = True
+    await controller._away_prompts()
+
+    session.generate_reply.assert_not_awaited()
+    session.say.assert_not_called()
+    controller._ctx.delete_room.assert_not_called()

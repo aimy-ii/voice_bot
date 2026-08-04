@@ -580,6 +580,9 @@ class CallTurnController:
                 if has_question(text):
                     logger.info("[turn] тишина: вопрос уже задан, идём на проверку связи")
                 else:
+                    if self._ending:
+                        logger.info("[turn] тишина: звонок завершается, лестница остановлена")
+                        return
                     self.silence_attempts += 1
                     logger.info("[turn] тишина: ход вытаскивания (pull)")
                     set_turn_kind(self._session.llm, "pull")
@@ -591,6 +594,9 @@ class CallTurnController:
             else:
                 max_attempts = self._settings.silence_attempts
                 while self.silence_attempts < max_attempts:
+                    if self._ending:
+                        logger.info("[turn] тишина: звонок завершается, лестница остановлена")
+                        return
                     self.silence_attempts += 1
                     logger.info(
                         "[turn] тишина: попытка #%s, ход silence",
@@ -619,6 +625,9 @@ class CallTurnController:
                     await asyncio.sleep(pause)
 
             if self._settings.silence_smart_pauses and not self._link_checked:
+                if self._ending:
+                    logger.info("[turn] тишина: звонок завершается, лестница остановлена")
+                    return
                 self._link_checked = True
                 phrase = self._settings.silence_link_check
                 logger.info("[turn] тишина: проверка связи, попытка 1, фраза=%r", phrase)
@@ -627,10 +636,16 @@ class CallTurnController:
 
                 second = self._settings.silence_link_check_second.strip()
                 if second:
+                    if self._ending:
+                        logger.info("[turn] тишина: звонок завершается, лестница остановлена")
+                        return
                     logger.info("[turn] тишина: проверка связи, попытка 2, фраза=%r", second)
                     await self._say_and_wait(second)
                     await asyncio.sleep(self._settings.silence_link_check_second_pause)
 
+            if self._ending:
+                logger.info("[turn] тишина: звонок завершается, лестница остановлена")
+                return
             goodbye = self._settings.silence_goodbye
             logger.info(
                 "[turn] тишина: звонок завершается (исчерпаны попытки), фраза=%r",
