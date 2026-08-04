@@ -550,3 +550,33 @@ def test_build_session_openai_tts_has_no_text_normalization(
     mocks["tts_openai"].assert_called_once()
     mocks["tts"].assert_not_called()
     assert "apply_text_normalization" not in mocks["tts_openai"].call_args.kwargs
+
+
+def test_build_session_user_away_timeout_is_none_toggle_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """user_away_timeout уходит в AgentSession как None при выключенном тумблере."""
+    _set_session_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_SILENCE_SMART_PAUSES", "false")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_TIMEOUT", "6")
+    mocks = _patch_common_providers(monkeypatch)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    session_module.build_session(settings)
+
+    assert mocks["session_ctor"].call_args.kwargs["user_away_timeout"] is None
+
+
+def test_build_session_user_away_timeout_is_none_toggle_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """user_away_timeout всегда None — не зависит от тумблера умных пауз."""
+    _set_session_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_SILENCE_SMART_PAUSES", "true")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_TIMEOUT", "6")
+    mocks = _patch_common_providers(monkeypatch)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    session_module.build_session(settings)
+
+    assert mocks["session_ctor"].call_args.kwargs["user_away_timeout"] is None

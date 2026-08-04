@@ -157,6 +157,32 @@ class Settings(BaseSettings):
     )
     #: Сколько раз пробуем вернуть человека в разговор, прежде чем прощаться.
     silence_attempts: int = Field(default=2, alias="VOICE_BOT_SILENCE_ATTEMPTS")
+    #: Тумблер механики пауз. Выключено — бот ждёт фиксированный
+    #: VOICE_BOT_SILENCE_TIMEOUT, ровно как до появления механики.
+    #: Включено — длина паузы зависит от знака вопроса в реплике бота.
+    silence_smart_pauses: bool = Field(default=False, alias="VOICE_BOT_SILENCE_SMART_PAUSES")
+    #: Сколько ждать ответа, если бот закончил реплику вопросом.
+    silence_pause_question: float = Field(default=4.0, alias="VOICE_BOT_SILENCE_PAUSE_QUESTION")
+    #: Сколько ждать, если вопроса в реплике бота не было.
+    silence_pause_statement: float = Field(default=1.2, alias="VOICE_BOT_SILENCE_PAUSE_STATEMENT")
+    #: Что сказать перед прощанием, когда человек перестал отвечать.
+    silence_link_check: str = Field(
+        default="Алло, меня слышно?", alias="VOICE_BOT_SILENCE_LINK_CHECK"
+    )
+    #: Сколько ждать после первой попытки, прежде чем говорить вторую.
+    silence_link_check_pause: float = Field(default=1.5, alias="VOICE_BOT_SILENCE_LINK_CHECK_PAUSE")
+    #: Вторая, короткая попытка достучаться, если после первой тишина.
+    silence_link_check_second: str = Field(
+        default="Алло, меня слышно?", alias="VOICE_BOT_SILENCE_LINK_CHECK_SECOND"
+    )
+    #: Сколько ждать после второй попытки, прежде чем прощаться.
+    silence_link_check_second_pause: float = Field(
+        default=1.0, alias="VOICE_BOT_SILENCE_LINK_CHECK_SECOND_PAUSE"
+    )
+    #: Тумблер упрощённой лестницы молчания. Выключено — цикл попыток
+    #: `silence`, как раньше. Включено — один `pull` или сразу проверка связи
+    #: по знаку вопроса в последней реплике бота.
+    silence_modes: bool = Field(default=False, alias="VOICE_BOT_SILENCE_MODES")
     #: Сколько продолжений подряд разрешено, страховка от монолога.
     max_continuations: int = Field(default=3, alias="VOICE_BOT_MAX_CONTINUATIONS")
 

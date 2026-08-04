@@ -987,6 +987,9 @@ def build_session(settings: Settings, *, room_name: str | None = None) -> AgentS
         vad=vad,
         # Определяет, что реплика клиента завершена (мультиязычная модель).
         turn_handling=TurnHandlingOptions(turn_detection=MultilingualModel()),
-        # Штатный детект тишины LiveKit: оба молчат → user_state=away.
-        user_away_timeout=settings.silence_timeout or None,
+        # Отсчёт тишины ведёт бот, а не LiveKit: длина паузы зависит от текста
+        # реплики и должна меняться по ходу звонка, а user_away_timeout читается
+        # из приватного поля сессии в момент взвода таймера и после создания
+        # сессии неизменен. Подробности — voice_bot.agent.silence.
+        user_away_timeout=None,
     )
