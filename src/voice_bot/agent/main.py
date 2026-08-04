@@ -156,7 +156,7 @@ class CallTurnController:
                 logger.info("[turn] бот договорил: agent_state_changed speaking→%s", ev.new_state)
                 self._schedule_finished()
             if ev.new_state == "listening":
-                self.on_agent_listening()
+                self.on_agent_listening(after_speech=ev.old_state == "speaking")
             else:
                 self._cancel_listen_away_wait()
                 self._cancel_silence_wait()
@@ -248,7 +248,7 @@ class CallTurnController:
         if task is not current:
             task.cancel()
 
-    def on_agent_listening(self) -> None:
+    def on_agent_listening(self, *, after_speech: bool = False) -> None:
         """Бот перешёл в ожидание ответа: при отметке молчания — отсчёт.
 
         LiveKit не перевыставляет ``away``, если клиент уже away. Поэтому
@@ -256,9 +256,17 @@ class CallTurnController:
         момента listening и запускаем оклики. При завершении звонка по
         признаку мозга отсчёт не стартуем.
 
+        Args:
+            after_speech: переход произошёл сразу после речи бота (включая
+                прерванную), то есть бот только что договорил; по этому
+                признаку пересчитываются серии безответных реплик. У
+                прерванной реплики учитывается только прозвучавшая часть.
+
         Returns:
             None.
         """
+        if after_speech and self._settings.silence_modes and not self._ending:
+            self._update_unanswered_counts()
         self._schedule_silence_wait()
         if self._ending:
             return
@@ -284,15 +292,16 @@ class CallTurnController:
             name="listen-away-wait",
         )
 
-    def _update_unanswered_counts(self, text: str) -> None:
+    def _update_unanswered_counts(self) -> None:
         """Обновить серии безответных реплик бота через ``next_counts`` и записать в лог.
 
-        Args:
-            text: текст последней произнесённой реплики бота.
+        Текст берёт из снимка истории сессии (последняя реплика бота).
 
         Returns:
             None.
         """
+        history = chat_history_snapshot(self._session)
+        text = last_agent_text(history)
         self._unanswered_questions, self._unanswered_statements = next_counts(
             (self._unanswered_questions, self._unanswered_statements),
             text,
@@ -329,8 +338,7 @@ class CallTurnController:
 
         Отсчёт не стартует, если звонок завершается или оклики уже идут.
         Предыдущий отсчёт отменяется, чтобы на одну паузу не пришлось два
-        таймера. При включённом ``silence_modes`` один раз пересчитывает
-        серии безответных реплик по последней фразе бота.
+        таймера.
 
         Returns:
             None.
@@ -345,20 +353,13 @@ class CallTurnController:
             return
         self._cancel_silence_wait()
 
-        need_history = self._settings.silence_smart_pauses or self._settings.silence_modes
-        if need_history:
+        if self._settings.silence_smart_pauses:
             history = chat_history_snapshot(self._session)
-            text = last_agent_text(history)
-            if self._settings.silence_modes:
-                self._update_unanswered_counts(text)
-            if self._settings.silence_smart_pauses:
-                pause, reason = pick_pause(
-                    history,
-                    pause_question=self._settings.silence_pause_question,
-                    pause_statement=self._settings.silence_pause_statement,
-                )
-            else:
-                pause, reason = self._settings.silence_timeout, "фиксированная"
+            pause, reason = pick_pause(
+                history,
+                pause_question=self._settings.silence_pause_question,
+                pause_statement=self._settings.silence_pause_statement,
+            )
         else:
             pause, reason = self._pick_pause()
 
