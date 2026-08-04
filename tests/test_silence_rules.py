@@ -1,6 +1,6 @@
 """Офлайн-тесты чистых правил выбора паузы при молчании."""
 
-from voice_bot.agent.silence import has_question, last_agent_text, next_counts, pick_pause
+from voice_bot.agent.silence import has_question, last_agent_text, pick_pause
 
 
 def test_last_agent_text_takes_latest_ai_before_human() -> None:
@@ -28,27 +28,6 @@ def test_has_question_finds_mark_in_middle() -> None:
     """Знак вопроса находится в середине реплики, не только в конце."""
     assert has_question("Как вас зовут? Уточните, пожалуйста.") is True
     assert has_question("Здравствуйте.") is False
-
-
-def test_next_counts_question_increments_and_clears_statements() -> None:
-    """Реплика с вопросом увеличивает счёт вопросов и обнуляет счёт без вопроса."""
-    assert next_counts((0, 2), "Вам удобно?") == (1, 0)
-    assert next_counts((1, 0), "Как вас зовут?") == (2, 0)
-
-
-def test_next_counts_statement_increments_and_clears_questions() -> None:
-    """Реплика без вопроса увеличивает второй счёт и обнуляет первый."""
-    assert next_counts((2, 0), "Хорошо, записала.") == (0, 1)
-    assert next_counts((0, 1), "Поняла.") == (0, 2)
-
-
-def test_next_counts_alternation_resets_question_streak() -> None:
-    """Чередование вопрос — не вопрос — вопрос даёт единицу по вопросам."""
-    counts = (0, 0)
-    counts = next_counts(counts, "Как вас зовут?")
-    counts = next_counts(counts, "Хорошо, записала.")
-    counts = next_counts(counts, "Вам удобно?")
-    assert counts == (1, 0)
 
 
 def test_pick_pause_question() -> None:

@@ -40,29 +40,6 @@ def has_question(text: str) -> bool:
     return "?" in text
 
 
-def next_counts(
-    counts: tuple[int, int],
-    text: str,
-) -> tuple[int, int]:
-    """Пересчитать серии безответных реплик бота после очередной реплики.
-
-    Реплика с вопросом увеличивает счёт вопросов и обнуляет счёт реплик без
-    вопроса; реплика без вопроса — наоборот. Серии взаимно исключают друг друга,
-    поэтому одна из величин всегда ноль.
-
-    Args:
-        counts: пара «вопросов подряд, реплик без вопроса подряд» до этой реплики.
-        text: текст реплики бота.
-
-    Returns:
-        Новая пара «вопросов подряд, реплик без вопроса подряд».
-    """
-    questions, statements = counts
-    if has_question(text):
-        return questions + 1, 0
-    return 0, statements + 1
-
-
 def pick_pause(
     history: list[dict[str, str]],
     *,
