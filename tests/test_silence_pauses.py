@@ -213,3 +213,178 @@ async def test_reschedule_silence_wait_cancels_previous() -> None:
 
     controller._cancel_silence_wait()
     await asyncio.gather(first, second, return_exceptions=True)
+
+
+def _feed_agent_replies(controller: main_module.CallTurnController, texts: list[str]) -> None:
+    """Прогнать реплики бота через ``_pick_pause``, чтобы обновить серии."""
+    for text in texts:
+        history = [{"type": "ai", "content": text}]
+        with patch.object(main_module, "chat_history_snapshot", return_value=history):
+            controller._pick_pause()
+
+
+@pytest.mark.asyncio
+async def test_modes_off_always_sends_silence_never_pull() -> None:
+    """Тумблер выключен — в set_turn_kind уходит только silence, никогда pull."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=False,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    # Даже при «набранных» сериях без тумблера ветки не включаются.
+    controller._unanswered_statements = 10
+    controller._unanswered_questions = 10
+
+    turn_kinds: list[str] = []
+
+    async def _track_generate() -> None:
+        turn_kinds.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_track_generate)
+
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
+    await task
+
+    assert turn_kinds == ["silence", "silence"]
+    assert "pull" not in turn_kinds
+
+
+@pytest.mark.asyncio
+async def test_modes_on_three_statements_sends_pull() -> None:
+    """Тумблер включён, три реплики без вопроса подряд — ход pull."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=1,
+        VOICE_BOT_SILENCE_STATEMENTS_TO_PULL=3,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    _feed_agent_replies(controller, ["Ок.", "Записала.", "Хорошо."])
+    assert controller._unanswered_statements == 3
+    assert controller._unanswered_questions == 0
+
+    turn_kinds: list[str] = []
+
+    async def _track_generate() -> None:
+        turn_kinds.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_track_generate)
+
+    with patch.object(
+        main_module,
+        "chat_history_snapshot",
+        return_value=[{"type": "ai", "content": "Хорошо."}],
+    ):
+        controller.on_user_away()
+        task = controller.away_task
+        assert task is not None
+        await task
+
+    assert turn_kinds == ["pull"]
+
+
+@pytest.mark.asyncio
+async def test_modes_on_two_questions_short_path_to_link_check() -> None:
+    """Две безответных вопроса подряд — ход в мозг не делается, сразу проверка связи."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=3,
+        VOICE_BOT_SILENCE_QUESTIONS_TO_LINK_CHECK=2,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK="Алло, меня слышно?",
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+        VOICE_BOT_SILENCE_GOODBYE="до связи",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    _feed_agent_replies(controller, ["Как вас зовут?", "Вам удобно?"])
+    assert controller._unanswered_questions == 2
+
+    said: list[str] = []
+
+    def _track_say(text: str, *_a: object, **_k: object) -> SimpleNamespace:
+        said.append(text)
+        return SimpleNamespace(wait_for_playout=AsyncMock())
+
+    session.say = MagicMock(side_effect=_track_say)
+
+    controller.on_user_away()
+    task = controller.away_task
+    assert task is not None
+    await task
+
+    session.generate_reply.assert_not_awaited()
+    assert said == ["Алло, меня слышно?", "до связи"]
+
+
+@pytest.mark.asyncio
+async def test_modes_on_alternation_does_not_take_short_path() -> None:
+    """Чередование вопрос — не вопрос — вопрос до короткого пути не доводит."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_MODES=True,
+        VOICE_BOT_SILENCE_SMART_PAUSES=True,
+        VOICE_BOT_SILENCE_TIMEOUT=0,
+        VOICE_BOT_SILENCE_ATTEMPTS=1,
+        VOICE_BOT_SILENCE_QUESTIONS_TO_LINK_CHECK=2,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0,
+        VOICE_BOT_SILENCE_LINK_CHECK_PAUSE=0,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    _feed_agent_replies(
+        controller,
+        ["Как вас зовут?", "Хорошо, записала.", "Вам удобно?"],
+    )
+    assert controller._unanswered_questions == 1
+    assert controller._unanswered_statements == 0
+
+    turn_kinds: list[str] = []
+
+    async def _track_generate() -> None:
+        turn_kinds.append(session.llm._config["configurable"]["turn_kind"])
+
+    session.generate_reply = AsyncMock(side_effect=_track_generate)
+
+    with patch.object(
+        main_module,
+        "chat_history_snapshot",
+        return_value=[{"type": "ai", "content": "Вам удобно?"}],
+    ):
+        controller.on_user_away()
+        task = controller.away_task
+        assert task is not None
+        await task
+
+    assert turn_kinds == ["silence"]
+    session.generate_reply.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_user_present_resets_unanswered_counts() -> None:
+    """Реплика человека обнуляет оба счёта безответных реплик."""
+    controller = _controller(
+        settings=_settings(VOICE_BOT_SILENCE_MODES=True),
+    )
+    controller._unanswered_questions = 2
+    controller._unanswered_statements = 3
+
+    controller.on_user_present()
+
+    assert controller._unanswered_questions == 0
+    assert controller._unanswered_statements == 0

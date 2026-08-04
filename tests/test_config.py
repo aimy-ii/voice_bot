@@ -465,6 +465,9 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("VOICE_BOT_SILENCE_PAUSE_STATEMENT", raising=False)
     monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK", raising=False)
     monkeypatch.delenv("VOICE_BOT_SILENCE_LINK_CHECK_PAUSE", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_MODES", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_QUESTIONS_TO_LINK_CHECK", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_STATEMENTS_TO_PULL", raising=False)
 
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
 
@@ -479,6 +482,37 @@ def test_silence_and_continuation_defaults(monkeypatch: pytest.MonkeyPatch) -> N
     assert settings.silence_pause_statement == 1.2
     assert settings.silence_link_check_pause == 3.5
     assert settings.silence_link_check == "Алло, меня слышно?"
+    assert settings.silence_modes is False
+    assert settings.silence_questions_to_link_check == 2
+    assert settings.silence_statements_to_pull == 3
+
+
+def test_silence_modes_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Дефолты веток молчания: тумблер выключен, пороги 2 и 3."""
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_MODES", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_QUESTIONS_TO_LINK_CHECK", raising=False)
+    monkeypatch.delenv("VOICE_BOT_SILENCE_STATEMENTS_TO_PULL", raising=False)
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.silence_modes is False
+    assert settings.silence_questions_to_link_check == 2
+    assert settings.silence_statements_to_pull == 3
+
+
+def test_silence_modes_thresholds_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пороги веток молчания читаются из окружения."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("VOICE_BOT_SILENCE_MODES", "true")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_QUESTIONS_TO_LINK_CHECK", "4")
+    monkeypatch.setenv("VOICE_BOT_SILENCE_STATEMENTS_TO_PULL", "5")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.silence_modes is True
+    assert settings.silence_questions_to_link_check == 4
+    assert settings.silence_statements_to_pull == 5
 
 
 def test_silence_smart_pauses_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

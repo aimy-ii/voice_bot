@@ -44,7 +44,7 @@ from voice_bot.agent.session import (
     set_turn_kind,
     thread_id_for_room,
 )
-from voice_bot.agent.silence import pick_pause
+from voice_bot.agent.silence import last_agent_text, next_counts, pick_pause
 from voice_bot.config import Settings, get_settings
 from voice_bot.logging_setup import setup_logging
 from voice_bot.scenario.loader import load_scenario
@@ -139,6 +139,10 @@ class CallTurnController:
         self._silence_wait_task: asyncio.Task[None] | None = None
         #: Проверку связи в этом заходе уже произносили — второй раз не повторяем.
         self._link_checked: bool = False
+        #: Безответных вопросов бота подряд.
+        self._unanswered_questions: int = 0
+        #: Реплик бота без вопроса подряд.
+        self._unanswered_statements: int = 0
         #: Мозг пометил разговор оконченным — оклики и продолжения больше не нужны.
         self._ending: bool = False
         self._finished_tasks: set[asyncio.Task[None]] = set()
@@ -230,6 +234,9 @@ class CallTurnController:
         self.away_task = None
         self.silence_attempts = 0
         self._link_checked = False
+        self._unanswered_questions = 0
+        self._unanswered_statements = 0
+        logger.info("[turn] тишина: счётчики безответных реплик сброшены")
         self._cancel_silence_wait()
         if task is None or task.done():
             return
@@ -284,12 +291,31 @@ class CallTurnController:
         ``silence_timeout`` — это поведение до появления механики. При
         включённом — считает паузу по последней реплике бота.
 
+        При включённом ``silence_modes`` попутно пересчитывает серии
+        безответных вопросов и реплик без вопроса по тому же снимку истории.
+
         Returns:
             Пара «длина паузы в секундах, причина выбора для лога».
         """
+        need_history = self._settings.silence_smart_pauses or self._settings.silence_modes
+        if not need_history:
+            return self._settings.silence_timeout, "фиксированная"
+
+        history = chat_history_snapshot(self._session)
+        if self._settings.silence_modes:
+            text = last_agent_text(history)
+            self._unanswered_questions, self._unanswered_statements = next_counts(
+                (self._unanswered_questions, self._unanswered_statements),
+                text,
+            )
+            logger.info(
+                "[turn] тишина: вопросов подряд %s, реплик без вопроса %s",
+                self._unanswered_questions,
+                self._unanswered_statements,
+            )
+
         if not self._settings.silence_smart_pauses:
             return self._settings.silence_timeout, "фиксированная"
-        history = chat_history_snapshot(self._session)
         return pick_pause(
             history,
             pause_question=self._settings.silence_pause_question,
@@ -570,7 +596,20 @@ class CallTurnController:
                     "[turn] тишина: попытка #%s, ход silence",
                     self.silence_attempts,
                 )
-                set_turn_kind(self._session.llm, "silence")
+                if self._settings.silence_modes:
+                    if self._unanswered_questions >= self._settings.silence_questions_to_link_check:
+                        logger.info(
+                            "[turn] тишина: короткий путь — %s безответных вопроса подряд",
+                            self._unanswered_questions,
+                        )
+                        break
+                    if self._unanswered_statements >= self._settings.silence_statements_to_pull:
+                        logger.info("[turn] тишина: ход вытаскивания (pull)")
+                        set_turn_kind(self._session.llm, "pull")
+                    else:
+                        set_turn_kind(self._session.llm, "silence")
+                else:
+                    set_turn_kind(self._session.llm, "silence")
                 cancelled = False
                 try:
                     await self._session.generate_reply()

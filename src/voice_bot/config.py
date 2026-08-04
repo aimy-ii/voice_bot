@@ -171,6 +171,15 @@ class Settings(BaseSettings):
     )
     #: Сколько ждать ответа после проверки связи, прежде чем прощаться.
     silence_link_check_pause: float = Field(default=3.5, alias="VOICE_BOT_SILENCE_LINK_CHECK_PAUSE")
+    #: Тумблер веток `pull` и короткого пути. Выключено — бот всегда шлёт
+    #: `silence`, как до появления режимов.
+    silence_modes: bool = Field(default=False, alias="VOICE_BOT_SILENCE_MODES")
+    #: Сколько безответных вопросов подряд ведут сразу к проверке связи.
+    silence_questions_to_link_check: int = Field(
+        default=2, alias="VOICE_BOT_SILENCE_QUESTIONS_TO_LINK_CHECK"
+    )
+    #: Сколько реплик без вопроса подряд включают ход вытаскивания.
+    silence_statements_to_pull: int = Field(default=3, alias="VOICE_BOT_SILENCE_STATEMENTS_TO_PULL")
     #: Сколько продолжений подряд разрешено, страховка от монолога.
     max_continuations: int = Field(default=3, alias="VOICE_BOT_MAX_CONTINUATIONS")
 
