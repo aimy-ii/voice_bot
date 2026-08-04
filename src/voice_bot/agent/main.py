@@ -284,38 +284,40 @@ class CallTurnController:
             name="listen-away-wait",
         )
 
+    def _update_unanswered_counts(self, text: str) -> None:
+        """Обновить серии безответных реплик бота через ``next_counts`` и записать в лог.
+
+        Args:
+            text: текст последней произнесённой реплики бота.
+
+        Returns:
+            None.
+        """
+        self._unanswered_questions, self._unanswered_statements = next_counts(
+            (self._unanswered_questions, self._unanswered_statements),
+            text,
+        )
+        logger.info(
+            "[turn] тишина: вопросов подряд %s, реплик без вопроса %s",
+            self._unanswered_questions,
+            self._unanswered_statements,
+        )
+
     def _pick_pause(self) -> tuple[float, str]:
         """Выбрать длину паузы перед следующей репликой бота.
 
         При выключенном тумблере всегда возвращает фиксированный
         ``silence_timeout`` — это поведение до появления механики. При
         включённом — считает паузу по последней реплике бота.
-
-        При включённом ``silence_modes`` попутно пересчитывает серии
-        безответных вопросов и реплик без вопроса по тому же снимку истории.
+        Счётчики безответных реплик не трогает.
 
         Returns:
             Пара «длина паузы в секундах, причина выбора для лога».
         """
-        need_history = self._settings.silence_smart_pauses or self._settings.silence_modes
-        if not need_history:
+        if not self._settings.silence_smart_pauses:
             return self._settings.silence_timeout, "фиксированная"
 
         history = chat_history_snapshot(self._session)
-        if self._settings.silence_modes:
-            text = last_agent_text(history)
-            self._unanswered_questions, self._unanswered_statements = next_counts(
-                (self._unanswered_questions, self._unanswered_statements),
-                text,
-            )
-            logger.info(
-                "[turn] тишина: вопросов подряд %s, реплик без вопроса %s",
-                self._unanswered_questions,
-                self._unanswered_statements,
-            )
-
-        if not self._settings.silence_smart_pauses:
-            return self._settings.silence_timeout, "фиксированная"
         return pick_pause(
             history,
             pause_question=self._settings.silence_pause_question,
@@ -327,7 +329,8 @@ class CallTurnController:
 
         Отсчёт не стартует, если звонок завершается или оклики уже идут.
         Предыдущий отсчёт отменяется, чтобы на одну паузу не пришлось два
-        таймера.
+        таймера. При включённом ``silence_modes`` один раз пересчитывает
+        серии безответных реплик по последней фразе бота.
 
         Returns:
             None.
@@ -341,7 +344,24 @@ class CallTurnController:
         if self._silence_deferred:
             return
         self._cancel_silence_wait()
-        pause, reason = self._pick_pause()
+
+        need_history = self._settings.silence_smart_pauses or self._settings.silence_modes
+        if need_history:
+            history = chat_history_snapshot(self._session)
+            text = last_agent_text(history)
+            if self._settings.silence_modes:
+                self._update_unanswered_counts(text)
+            if self._settings.silence_smart_pauses:
+                pause, reason = pick_pause(
+                    history,
+                    pause_question=self._settings.silence_pause_question,
+                    pause_statement=self._settings.silence_pause_statement,
+                )
+            else:
+                pause, reason = self._settings.silence_timeout, "фиксированная"
+        else:
+            pause, reason = self._pick_pause()
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
