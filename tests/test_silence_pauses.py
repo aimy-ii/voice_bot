@@ -1,13 +1,45 @@
 """Офлайн-тесты механики умных пауз в CallTurnController."""
 
 import asyncio
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from livekit.agents import AgentStateChangedEvent
 
 from voice_bot.agent import main as main_module
 from voice_bot.config import Settings
+
+
+def _emit_agent_state(
+    controller: main_module.CallTurnController,
+    *,
+    old_state: str,
+    new_state: str,
+) -> None:
+    """Подписать attach и прогнать ``agent_state_changed`` с заданными состояниями.
+
+    Args:
+        controller: контроллер с фейковой сессией.
+        old_state: прежнее состояние агента.
+        new_state: новое состояние агента.
+    """
+    handlers: dict[str, Callable[..., Any]] = {}
+
+    def _on(event: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        def _decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+            handlers[event] = fn
+            return fn
+
+        return _decorator
+
+    controller._session.on = _on  # type: ignore[method-assign]
+    controller.attach()
+    handlers["agent_state_changed"](
+        AgentStateChangedEvent(old_state=old_state, new_state=new_state)  # type: ignore[arg-type]
+    )
 
 
 def _settings(**overrides: object) -> Settings:
@@ -665,3 +697,141 @@ async def test_ending_modes_off_skips_silence_attempts() -> None:
     session.generate_reply.assert_not_awaited()
     session.say.assert_not_called()
     controller._ctx.delete_room.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_speaking_to_listening_schedules_silence_wait() -> None:
+    """Переход speaking→listening взводит отсчёт тишины."""
+    settings = _settings(VOICE_BOT_SILENCE_TIMEOUT=10.0)
+    controller = _controller(settings=settings)
+    session = controller._session
+    session.agent_state = "listening"
+
+    _emit_agent_state(controller, old_state="speaking", new_state="listening")
+
+    wait_task = controller._silence_wait_task
+    assert wait_task is not None
+    assert not wait_task.done()
+
+    controller._cancel_silence_wait()
+    await asyncio.gather(wait_task, return_exceptions=True)
+    for task in list(controller._finished_tasks):
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_thinking_to_listening_does_not_schedule_silence_wait() -> None:
+    """Переход thinking→listening отсчёт тишины не взводит."""
+    settings = _settings(VOICE_BOT_SILENCE_TIMEOUT=10.0)
+    controller = _controller(settings=settings)
+    session = controller._session
+    session.agent_state = "listening"
+
+    _emit_agent_state(controller, old_state="thinking", new_state="listening")
+
+    assert controller._silence_wait_task is None
+    session.generate_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_thinking_to_listening_does_not_start_pull() -> None:
+    """После thinking→listening вытягивание не запускается (generate_reply не вызывается)."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0.05,
+        VOICE_BOT_SILENCE_PAUSE_QUESTION=0.05,
+        VOICE_BOT_SILENCE_PAUSE_STATEMENT=0.05,
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+    session.agent_state = "listening"
+    session.user_state = "away"
+
+    _emit_agent_state(controller, old_state="thinking", new_state="listening")
+
+    await asyncio.sleep(0.15)
+
+    assert controller._silence_wait_task is None
+    assert controller.away_task is None
+    session.generate_reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_leave_listening_cancels_silence_wait_and_deferred() -> None:
+    """Выход из listening отменяет отсчёт тишины и отложенный таймер молчания."""
+    settings = _settings(VOICE_BOT_SILENCE_TIMEOUT=10.0)
+
+    # Собственный отсчёт тишины после speaking→listening.
+    controller = _controller(settings=settings)
+    session = controller._session
+    session.agent_state = "listening"
+    _emit_agent_state(controller, old_state="speaking", new_state="listening")
+    silence_task = controller._silence_wait_task
+    assert silence_task is not None
+    assert not silence_task.done()
+
+    _emit_agent_state(controller, old_state="listening", new_state="thinking")
+    await asyncio.sleep(0)
+    assert controller._silence_wait_task is None
+    assert silence_task.cancelled() or silence_task.done()
+    for task in list(controller._finished_tasks):
+        await asyncio.gather(task, return_exceptions=True)
+
+    # Отложенный таймер молчания после away во время речи бота.
+    deferred_controller = _controller(settings=settings)
+    deferred_session = deferred_controller._session
+    deferred_session.agent_state = "speaking"
+    deferred_controller.on_user_away()
+    assert deferred_controller._silence_deferred is True
+
+    deferred_session.agent_state = "listening"
+    _emit_agent_state(deferred_controller, old_state="speaking", new_state="listening")
+    listen_away = deferred_controller._listen_away_task
+    assert listen_away is not None
+    assert deferred_controller._silence_wait_task is None
+
+    _emit_agent_state(deferred_controller, old_state="listening", new_state="thinking")
+    await asyncio.sleep(0)
+    assert deferred_controller._listen_away_task is None
+    assert listen_away.cancelled() or listen_away.done()
+    for task in list(deferred_controller._finished_tasks):
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_deferred_silence_still_starts_on_listening() -> None:
+    """Отложенная отметка молчания на входе в listening работает как раньше."""
+    settings = _settings(
+        VOICE_BOT_SILENCE_TIMEOUT=0.05,
+        VOICE_BOT_SILENCE_ATTEMPTS=2,
+        VOICE_BOT_SILENCE_GOODBYE="пока",
+    )
+    controller = _controller(settings=settings)
+    session = controller._session
+
+    session.agent_state = "speaking"
+    controller.on_user_away()
+    assert controller._silence_deferred is True
+    assert controller.away_task is None
+
+    session.agent_state = "listening"
+    _emit_agent_state(controller, old_state="speaking", new_state="listening")
+    # При отложенной отметке собственный отсчёт тишины не взводится.
+    assert controller._silence_wait_task is None
+    wait_task = controller._listen_away_task
+    assert wait_task is not None
+
+    await wait_task
+    task = controller.away_task
+    assert task is not None
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if session.generate_reply.await_count >= 1:
+            break
+
+    assert session.generate_reply.await_count >= 1
+
+    controller.on_user_present()
+    await asyncio.gather(task, return_exceptions=True)
+    for finished in list(controller._finished_tasks):
+        await asyncio.gather(finished, return_exceptions=True)

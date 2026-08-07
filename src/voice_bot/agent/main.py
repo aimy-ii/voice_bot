@@ -151,6 +151,11 @@ class CallTurnController:
             if ev.old_state == "speaking":
                 logger.info("[turn] бот договорил: agent_state_changed speaking→%s", ev.new_state)
                 self._schedule_finished()
+                if ev.new_state == "listening":
+                    # Пауза перед вытягиванием отсчитывается от сказанной вслух
+                    # реплики. Возврат из thinking в listening — это конец
+                    # генерации, а не конец речи: реплика ещё не прозвучала.
+                    self._schedule_silence_wait()
             if ev.new_state == "listening":
                 self.on_agent_listening()
             else:
@@ -249,10 +254,13 @@ class CallTurnController:
         момента listening и запускаем оклики. При завершении звонка по
         признаку мозга отсчёт не стартуем.
 
+        Отсчёт тишины перед вытягиванием здесь больше не взводится — он
+        идёт от конца речи бота в обработчике ``agent_state_changed``.
+        Здесь остаётся только отложенная отметка молчания.
+
         Returns:
             None.
         """
-        self._schedule_silence_wait()
         if self._ending:
             return
         if not self._silence_deferred:
